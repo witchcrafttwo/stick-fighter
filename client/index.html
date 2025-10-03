@@ -55,6 +55,40 @@
       font-size: 15px;
     }
 
+    .name-input {
+      width: 100%;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #ccc;
+      font-size: 16px;
+    }
+
+    .start-button {
+      margin-top: 18px;
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      border-radius: 999px;
+      border: none;
+      color: #fff;
+      background: linear-gradient(135deg, #0087ff, #00c6ff);
+      cursor: pointer;
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
+    }
+
+    .start-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .start-button:not(:disabled):hover {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 24px rgba(0, 135, 255, 0.35);
+    }
+
     .color-options {
       display: flex;
       flex-wrap: wrap;
@@ -108,7 +142,9 @@
     <div class="color-panel">
       <h1>キャラクターの色を選択</h1>
       <div id="color-options" class="color-options"></div>
-      <p class="hint">好きな色をクリックするとゲームが始まります。</p>
+      <input id="player-name" class="name-input" type="text" placeholder="プレイヤー名を入力" maxlength="16" />
+      <button id="start-game" class="start-button" disabled>ゲーム開始</button>
+      <p class="hint">色を選び、名前を入力するとゲームが始まります。<br />スペース: 近接攻撃 / Z: 波動拳 (最大5回・15ダメージ) / Shift: 3秒間ガード (1秒クールダウン)</p>
     </div>
   </div>
   <script type="module" src="/script.js"></script>
