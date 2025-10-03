@@ -4,6 +4,7 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
+    "prestart": "npm --prefix ../client run build",
     "start": "node server.js"
   },
   "dependencies": {

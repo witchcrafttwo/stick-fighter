@@ -1,8 +1,81 @@
 import { createServer } from 'http';
+import { existsSync, readFileSync } from 'fs';
+import { dirname, extname, join, normalize } from 'path';
+import { fileURLToPath } from 'url';
 import { Server } from 'socket.io';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const clientDistPath = join(__dirname, '..', 'client', 'dist');
+
+const mimeTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+};
+
+const serveStaticFile = (req, res) => {
+  const urlPath = req.url?.split('?')[0] ?? '/';
+  const requestedPath = urlPath === '/' ? '/index.html' : urlPath;
+  const normalizedPath = normalize(requestedPath).replace(/\\/g, '/');
+  const relativePath = normalizedPath.replace(/^\/+/, '');
+  const safePath = relativePath.startsWith('..') ? 'index.html' : relativePath;
+  const resolvedPath = join(clientDistPath, safePath);
+
+  if (existsSync(resolvedPath)) {
+    const ext = extname(resolvedPath);
+    const contentType = mimeTypes[ext] ?? 'application/octet-stream';
+    try {
+      const file = readFileSync(resolvedPath);
+      res.writeHead(200, { 'Content-Type': contentType });
+      res.end(file);
+      return true;
+    } catch (error) {
+      console.error('Failed to read static file:', resolvedPath, error);
+      res.writeHead(500);
+      res.end('Internal Server Error');
+      return true;
+    }
+  }
+
+  const fallbackPath = join(clientDistPath, 'index.html');
+  if (existsSync(fallbackPath)) {
+    try {
+      const file = readFileSync(fallbackPath);
+      res.writeHead(200, { 'Content-Type': mimeTypes['.html'] });
+      res.end(file);
+      return true;
+    } catch (error) {
+      console.error('Failed to read fallback index.html:', error);
+      res.writeHead(500);
+      res.end('Internal Server Error');
+      return true;
+    }
+  }
+
+  return false;
+};
 
 const httpServer = createServer();
 const io = new Server(httpServer, { cors: { origin: "*" } });
+
+httpServer.on('request', (req, res) => {
+  if (req.url?.startsWith('/socket.io/')) {
+    return;
+  }
+
+  const handled = serveStaticFile(req, res);
+  if (!handled) {
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+});
 
 const DEFAULT_PROJECTILES = 5;
 const PROJECTILE_DAMAGE = 15;
