@@ -128,6 +128,10 @@ socket.on("restartGame", () => {
 
 socket.on("yourId", (id) => {
   myId = id;
+
+  if (opponentId) {
+    isLeft = myId < opponentId;
+  }
 });
 
 function startCountdownAndReset() {
@@ -190,7 +194,26 @@ function create() {
     socket.emit("restart");
   });
 
-  socket.on("opponentAttack", () => {
+  socket.on("opponentAttack", (payload) => {
+    const attackerId =
+      payload && typeof payload === "object"
+        ? payload.attackerId
+        : opponentId;
+
+    if (!opponentId && attackerId) {
+      opponentId = attackerId;
+      hasOpponent = true;
+      waitingText.setVisible(false);
+
+      if (myId) {
+        isLeft = myId < opponentId;
+      }
+    }
+
+    if (attackerId !== opponentId) {
+      return;
+    }
+
     opponentIsPunching = true;
     setTimeout(() => {
       opponentIsPunching = false;
@@ -198,14 +221,31 @@ function create() {
   });
 
   socket.on("playerUpdate", ({ id, x, y, hp, guarding, color }) => {
-    if (!opponentId) opponentId = id;
-    hasOpponent = true;
-    waitingText.setVisible(false);
-    opponent.x = x;
-    opponent.y = y;
-    opponentHp = hp;
+    if (!id || id === myId) {
+      return;
+    }
+
+    if (!opponentId || opponentId !== id) {
+      opponentId = id;
+      hasOpponent = true;
+      waitingText.setVisible(false);
+
+      if (myId) {
+        isLeft = myId < opponentId;
+      }
+    }
+
+    if (typeof x === "number") {
+      opponent.x = x;
+    }
+
+    if (typeof y === "number") {
+      opponent.y = y;
+    }
+    opponentHp = typeof hp === "number" ? hp : opponentHp;
     opponentIsGuarding = Boolean(guarding);
-    if (typeof color === 'number') {
+
+    if (typeof color === "number") {
       opponentColor = color;
     }
   });

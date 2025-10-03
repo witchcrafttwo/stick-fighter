@@ -10,6 +10,11 @@ io.on('connection', socket => {
   console.log(`Player connected: ${socket.id}`);
   socket.emit("yourId", socket.id);
 
+  // 既存プレイヤーの状態を新規接続に同期
+  Object.entries(players).forEach(([id, state]) => {
+    socket.emit('playerUpdate', { id, ...state });
+  });
+
   socket.on('update', data => {
     const previous = players[socket.id] ?? {};
 
@@ -20,6 +25,7 @@ io.on('connection', socket => {
       guarding: Boolean(data.guarding),
       color: typeof data.color === 'number' ? data.color : previous.color ?? 0x000000,
     };
+
     socket.broadcast.emit('playerUpdate', {
       id: socket.id,
       ...players[socket.id]
@@ -31,29 +37,36 @@ io.on('connection', socket => {
   });
 
   socket.on('attack', (attackerPos) => {
+    // 攻撃アニメを全員に通知（自分以外）
+    socket.broadcast.emit('opponentAttack', { attackerId: socket.id });
+
     for (let id in players) {
-      if (id !== socket.id) {
-        const target = players[id];
-        const dx = attackerPos.x - target.x;
-        const dy = attackerPos.y - target.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
+      if (id === socket.id) {
+        continue;
+      }
 
-        if (distance < 60) {
-          if (!players[id].guarding) {
-            players[id].hp = Math.max(0, players[id].hp - 10);
-            io.to(id).emit('attacked', { hp: players[id].hp });
-          }
+      const target = players[id];
+      if (!target) {
+        continue;
+      }
 
-          // ✅ 攻撃アニメ同期
-          io.to(id).emit('opponentAttack');
-          io.to(id).emit('opponentAttack'); // 攻撃された人に、相手の攻撃アニメを再生させる
+      const dx = attackerPos.x - target.x;
+      const dy = attackerPos.y - target.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
 
-          if (players[id].hp <= 0) {
-            io.to(id).emit('gameover', { result: "LOSE" });
-            io.to(socket.id).emit('gameover', { result: "WIN" });
-          }
+      if (distance < 60) {
+        if (!target.guarding) {
+          players[id].hp = Math.max(0, players[id].hp - 10);
+          io.to(id).emit('attacked', { hp: players[id].hp });
         }
 
+        // HP やガード状態を最新化
+        io.emit('playerUpdate', { id, ...players[id] });
+
+        if (players[id].hp <= 0) {
+          io.to(id).emit('gameover', { result: "LOSE" });
+          io.to(socket.id).emit('gameover', { result: "WIN" });
+        }
       }
     }
   });
