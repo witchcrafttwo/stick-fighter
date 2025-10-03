@@ -24,7 +24,9 @@ let hp = 100;
 let opponentHp = 100;
 let hpText;
 let isPunching = false;
+let isGuarding = false;
 let opponentIsPunching = false;
+let opponentIsGuarding = false;
 let resultText;
 let waitingText;
 let hasOpponent = false;
@@ -47,10 +49,12 @@ function resetGame() {
   }
 
   isPunching = false;
+  isGuarding = false;
   opponentIsPunching = false;
+  opponentIsGuarding = false;
   resultText.setText("");
 
-  socket.emit("update", { x: player.x, y: player.y, hp });
+  socket.emit("update", { x: player.x, y: player.y, hp, guarding: isGuarding });
 }
 
 socket.on("restartGame", () => {
@@ -128,13 +132,14 @@ function create() {
     }, 200);
   });
 
-  socket.on("playerUpdate", ({ id, x, y, hp }) => {
+  socket.on("playerUpdate", ({ id, x, y, hp, guarding }) => {
     if (!opponentId) opponentId = id;
     hasOpponent = true;
     waitingText.setVisible(false);
     opponent.x = x;
     opponent.y = y;
     opponentHp = hp;
+    opponentIsGuarding = Boolean(guarding);
   });
 
   socket.on("attacked", (data) => {
@@ -147,7 +152,13 @@ function create() {
   });
 }
 
-function drawStickman(gfx, x, y, color, isAttacking = false, faceLeft = false) {
+function drawStickman(
+  gfx,
+  x,
+  y,
+  color,
+  { attacking = false, guarding = false, faceLeft = false } = {}
+) {
   gfx.clear();
   gfx.lineStyle(4, color);
   gfx.strokeCircle(x, y - 30, 10);
@@ -157,14 +168,21 @@ function drawStickman(gfx, x, y, color, isAttacking = false, faceLeft = false) {
   gfx.strokePath();
 
   gfx.beginPath();
-  gfx.moveTo(x, y - 10);
-  gfx.lineTo(x - 20, y + 10);
-  if (isAttacking) {
-    gfx.moveTo(x, y - 10);
-    gfx.lineTo(faceLeft ? x - 40 : x + 40, y);
+  if (guarding) {
+    gfx.moveTo(x, y - 5);
+    gfx.lineTo(x - 15, y + 10);
+    gfx.moveTo(x, y - 5);
+    gfx.lineTo(x + 15, y + 10);
   } else {
     gfx.moveTo(x, y - 10);
-    gfx.lineTo(faceLeft ? x - 20 : x + 20, y + 10);
+    gfx.lineTo(x - 20, y + 10);
+    if (attacking) {
+      gfx.moveTo(x, y - 10);
+      gfx.lineTo(faceLeft ? x - 40 : x + 40, y);
+    } else {
+      gfx.moveTo(x, y - 10);
+      gfx.lineTo(faceLeft ? x - 20 : x + 20, y + 10);
+    }
   }
   gfx.strokePath();
 
@@ -181,7 +199,11 @@ function update() {
   if (!hasOpponent) waitingText.setVisible(true);
 
   let moved = false;
-  if (cursors.left.isDown) {
+  isGuarding = cursors.shift.isDown;
+
+  if (isGuarding) {
+    player.setVelocityX(0);
+  } else if (cursors.left.isDown) {
     player.setVelocityX(-160);
     moved = true;
   } else if (cursors.right.isDown) {
@@ -191,25 +213,41 @@ function update() {
     player.setVelocityX(0);
   }
 
-  if (cursors.up.isDown && player.body.blocked.down) {
+  if (!isGuarding && cursors.up.isDown && player.body.blocked.down) {
     player.setVelocityY(-400);
     moved = true;
   }
 
-  if (Phaser.Input.Keyboard.JustDown(cursors.space) && !isPunching) {
+  if (
+    Phaser.Input.Keyboard.JustDown(cursors.space) &&
+    !isPunching &&
+    !isGuarding
+  ) {
     isPunching = true;
     socket.emit("attack", { x: player.x, y: player.y });
-    socket.emit("update", { x: player.x, y: player.y, hp });
+    socket.emit("update", { x: player.x, y: player.y, hp, guarding: isGuarding });
     setTimeout(() => { isPunching = false; }, 200);
   }
 
-  if (moved) {
-    socket.emit("update", { x: player.x, y: player.y, hp });
+  if (
+    moved ||
+    Phaser.Input.Keyboard.JustDown(cursors.shift) ||
+    Phaser.Input.Keyboard.JustUp(cursors.shift)
+  ) {
+    socket.emit("update", { x: player.x, y: player.y, hp, guarding: isGuarding });
   }
 
-  drawStickman(playerGraphics, player.x, player.y, 0x000000, isPunching, isLeft);
-  drawStickman(opponentGraphics, opponent.x, opponent.y, 0xff0000, opponentIsPunching, !isLeft);
+  drawStickman(playerGraphics, player.x, player.y, 0x000000, {
+    attacking: isPunching,
+    guarding: isGuarding,
+    faceLeft: isLeft,
+  });
+  drawStickman(opponentGraphics, opponent.x, opponent.y, 0xff0000, {
+    attacking: opponentIsPunching,
+    guarding: opponentIsGuarding,
+    faceLeft: !isLeft,
+  });
   hpText.setText(`Your HP: ${hp} | Opponent HP: ${opponentHp}`);
 
-  socket.emit("update", { x: player.x, y: player.y, hp });
+  socket.emit("update", { x: player.x, y: player.y, hp, guarding: isGuarding });
 }
