@@ -135,9 +135,38 @@
       font-size: 13px;
       color: #666;
     }
+
+    .status-panel {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+      min-width: 160px;
+      z-index: 5;
+      font-size: 14px;
+      color: #222;
+    }
+
+    .ping-display {
+      font-weight: 600;
+      font-size: 13px;
+      color: #444;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
   </style>
 </head>
 <body>
+  <div id="status-panel" class="status-panel">
+    <div class="ping-display">
+      <span>Ping</span>
+      <span id="ping-value">--</span>
+    </div>
+  </div>
   <div id="color-selection">
     <div class="color-panel">
       <h1>キャラクターの色を選択</h1>

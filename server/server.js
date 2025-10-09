@@ -8,34 +8,100 @@ const DEFAULT_PROJECTILES = 5;
 const PROJECTILE_DAMAGE = 15;
 const PROJECTILE_SPEED = 520;
 const PROJECTILE_LIFETIME = 2200;
-const PROJECTILE_VERTICAL_TOLERANCE = 120;
+const PROJECTILE_VERTICAL_TOLERANCE = 60;
 const PROJECTILE_RANGE = 800;
+const RESTART_COOLDOWN_MS = 3500;
+
+const SPAWN_POSITIONS = [
+  { x: 200, y: 500 },
+  { x: 600, y: 500 },
+];
+
+function getAvailableSpawnIndex() {
+  const occupiedIndexes = new Set(
+    Object.values(players)
+      .map((state) => state?.spawnIndex)
+      .filter((index) => typeof index === 'number')
+  );
+
+  for (let i = 0; i < SPAWN_POSITIONS.length; i += 1) {
+    if (!occupiedIndexes.has(i)) {
+      return i;
+    }
+  }
+
+  return 0;
+}
 
 const players = {};
+
+let restartCooldownUntil = 0;
 
 io.on('connection', socket => {
   console.log(`Player connected: ${socket.id}`);
   socket.emit("yourId", socket.id);
 
-  players[socket.id] = players[socket.id] ?? {
-    x: 0,
-    y: 0,
-    hp: 100,
-    guarding: false,
-    color: 0x000000,
-    name: '',
-    projectilesRemaining: DEFAULT_PROJECTILES,
-  };
+  if (!players[socket.id]) {
+    const spawnIndex = getAvailableSpawnIndex();
+    const spawn = SPAWN_POSITIONS[spawnIndex] ?? SPAWN_POSITIONS[0];
+
+    players[socket.id] = {
+      x: spawn.x,
+      y: spawn.y,
+      hp: 100,
+      guarding: false,
+      color: 0x000000,
+      name: '',
+      projectilesRemaining: DEFAULT_PROJECTILES,
+      spawnIndex,
+    };
+  }
 
   // 既存プレイヤーの状態を新規接続に同期
-  Object.entries(players).forEach(([id, state]) => {
+  Object.entries(players).forEach(([id, currentState]) => {
     if (id === socket.id) {
       return;
     }
+
+    let state = currentState;
+    if (typeof state.spawnIndex !== 'number') {
+      const spawnIndex = getAvailableSpawnIndex();
+      const spawn = SPAWN_POSITIONS[spawnIndex] ?? SPAWN_POSITIONS[0];
+      players[id] = {
+        ...players[id],
+        spawnIndex,
+        x: spawn.x,
+        y: spawn.y,
+      };
+      state = players[id];
+    }
+
     socket.emit('playerUpdate', { id, ...state });
   });
 
   socket.emit('playerUpdate', { id: socket.id, ...players[socket.id] });
+  socket.emit('spawnInfo', {
+    id: socket.id,
+    spawnIndex: players[socket.id].spawnIndex,
+  });
+
+  Object.entries(players).forEach(([id, state]) => {
+    if (id === socket.id) {
+      return;
+    }
+
+    const spawnIndex =
+      typeof state.spawnIndex === 'number'
+        ? state.spawnIndex
+        : getAvailableSpawnIndex();
+    socket.emit('spawnInfo', { id, spawnIndex });
+  });
+
+  socket.broadcast.emit('playerUpdate', { id: socket.id, ...players[socket.id] });
+  socket.broadcast.emit('spawnInfo', {
+    id: socket.id,
+    spawnIndex: players[socket.id].spawnIndex,
+  });
 
   socket.on('update', data => {
     const previous = players[socket.id] ?? {
@@ -46,6 +112,7 @@ io.on('connection', socket => {
       color: 0x000000,
       name: '',
       projectilesRemaining: DEFAULT_PROJECTILES,
+      spawnIndex: getAvailableSpawnIndex(),
     };
 
     const sanitizedName =
@@ -68,6 +135,7 @@ io.on('connection', socket => {
         typeof previous.projectilesRemaining === 'number'
           ? previous.projectilesRemaining
           : DEFAULT_PROJECTILES,
+      spawnIndex: previous.spawnIndex,
     };
 
     socket.broadcast.emit('playerUpdate', {
@@ -77,16 +145,32 @@ io.on('connection', socket => {
   });
 
   socket.on('restart', () => {
+    const now = Date.now();
+    if (now < restartCooldownUntil) {
+      return;
+    }
+
+    restartCooldownUntil = now + RESTART_COOLDOWN_MS;
+
     Object.keys(players).forEach((id) => {
       if (!players[id]) {
         return;
       }
 
+      const spawnIndex =
+        typeof players[id]?.spawnIndex === 'number'
+          ? players[id].spawnIndex
+          : getAvailableSpawnIndex();
+      const spawn = SPAWN_POSITIONS[spawnIndex] ?? SPAWN_POSITIONS[0];
+
       players[id] = {
         ...players[id],
+        x: spawn.x,
+        y: spawn.y,
         hp: 100,
         guarding: false,
         projectilesRemaining: DEFAULT_PROJECTILES,
+        spawnIndex,
       };
 
       io.to(id).emit('attacked', { hp: 100 });
@@ -216,6 +300,14 @@ io.on('connection', socket => {
 
       break;
     }
+  });
+
+  socket.on('latencyTest', ({ clientTime } = {}) => {
+    if (typeof clientTime !== 'number') {
+      return;
+    }
+
+    socket.emit('latencyPong', { clientTime });
   });
 
   socket.on('disconnect', () => {

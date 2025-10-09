@@ -31,6 +31,7 @@ const colorSelectionOverlay = document.getElementById('color-selection');
 const colorOptionsContainer = document.getElementById('color-options');
 const nameInput = document.getElementById('player-name');
 const startButton = document.getElementById('start-game');
+const pingValueLabel = document.getElementById('ping-value');
 
 const hexToNumber = (hex) => parseInt(hex.replace('#', ''), 16);
 
@@ -39,6 +40,12 @@ const PROJECTILE_SPEED = 520;
 const PROJECTILE_LIFETIME = 2200;
 const GUARD_MAX_DURATION = 3000;
 const GUARD_COOLDOWN = 1000;
+const PROJECTILE_VERTICAL_TOLERANCE = 60;
+const SPAWN_POSITIONS = [
+  { x: 200, y: 500 },
+  { x: 600, y: 500 },
+];
+const PING_INTERVAL_MS = 4000;
 
 const config = {
   type: Phaser.AUTO,
@@ -97,6 +104,18 @@ let guardStartTime = 0;
 let guardCooldownUntil = 0;
 let wasGuarding = false;
 let projectiles = [];
+let spawnIndex = null;
+let opponentSpawnIndex = null;
+const DEFAULT_DISPLAY_LAG_MS = 0; // 手動で変更したい場合はここの値を書き換えてください
+let displayLagMs = DEFAULT_DISPLAY_LAG_MS;
+const laggedTimeouts = new Set();
+let latestPing = null;
+let pingIntervalId = null;
+let isRoundStarting = false;
+let restartRequestPending = false;
+let controlsLocked = false;
+let countdownTimerId = null;
+let restartUnlockTimeoutId = null;
 
 const updateStartButtonState = () => {
   const hasName = nameInput.value.trim().length > 0;
@@ -158,9 +177,115 @@ startButton.addEventListener('click', () => {
 
 updateStartButtonState();
 
+const updatePingLabel = (value) => {
+  if (!pingValueLabel) {
+    return;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    pingValueLabel.textContent = `${Math.round(value)}`;
+  } else {
+    pingValueLabel.textContent = '--';
+  }
+};
+
+const scheduleWithLag = (callback) => {
+  if (displayLagMs <= 0) {
+    callback();
+    return;
+  }
+
+  const timeoutId = window.setTimeout(() => {
+    laggedTimeouts.delete(timeoutId);
+    callback();
+  }, displayLagMs);
+
+  laggedTimeouts.add(timeoutId);
+};
+
+const clearLaggedTimeouts = () => {
+  laggedTimeouts.forEach((timeoutId) => {
+    window.clearTimeout(timeoutId);
+  });
+  laggedTimeouts.clear();
+};
+
+const positionPlayersForSpawn = () => {
+  if (!player || !opponent) {
+    return;
+  }
+
+  const myIndex = typeof spawnIndex === 'number' ? spawnIndex : 0;
+  const opponentIndex =
+    typeof opponentSpawnIndex === 'number'
+      ? opponentSpawnIndex
+      : myIndex === 0
+        ? 1
+        : 0;
+
+  const mySpawn = SPAWN_POSITIONS[myIndex] ?? SPAWN_POSITIONS[0];
+  const opponentSpawn = SPAWN_POSITIONS[opponentIndex] ?? SPAWN_POSITIONS[1] ?? SPAWN_POSITIONS[0];
+
+  player.setPosition(mySpawn.x, mySpawn.y);
+  opponent.setPosition(opponentSpawn.x, opponentSpawn.y);
+
+  if (player.body) {
+    player.body.setVelocity(0, 0);
+  }
+  if (opponent.body) {
+    opponent.body.setVelocity(0, 0);
+  }
+
+  isLeft = myIndex === 0;
+};
+
+const ensurePingInterval = () => {
+  if (pingIntervalId !== null) {
+    return;
+  }
+
+  pingIntervalId = window.setInterval(() => {
+    if (!socket.connected) {
+      return;
+    }
+
+    socket.emit('latencyTest', { clientTime: performance.now() });
+  }, PING_INTERVAL_MS);
+};
+
+ensurePingInterval();
+
+socket.on("connect", () => {
+  updatePingLabel(latestPing);
+  socket.emit("latencyTest", { clientTime: performance.now() });
+});
+
+socket.on("disconnect", () => {
+  updatePingLabel(null);
+});
+
+socket.on("latencyPong", ({ clientTime } = {}) => {
+  if (typeof clientTime !== "number") {
+    return;
+  }
+
+  latestPing = Math.max(0, performance.now() - clientTime);
+  updatePingLabel(latestPing);
+});
+
 function preload() {}
 
 function resetGame() {
+  if (countdownTimerId !== null) {
+    clearInterval(countdownTimerId);
+    countdownTimerId = null;
+  }
+
+  if (restartUnlockTimeoutId !== null) {
+    clearTimeout(restartUnlockTimeoutId);
+    restartUnlockTimeoutId = null;
+  }
+
   gameOver = false;
   hp = 100;
   opponentHp = 100;
@@ -170,6 +295,7 @@ function resetGame() {
   guardCooldownUntil = 0;
   guardStartTime = 0;
   wasGuarding = false;
+  clearLaggedTimeouts();
 
   projectiles.forEach((proj) => {
     proj.sprite.destroy();
@@ -180,11 +306,7 @@ function resetGame() {
     guardCooldownText.setText("");
   }
 
-  if (myId && opponentId) {
-    isLeft = myId < opponentId;
-    player.setPosition(isLeft ? 200 : 600, 500);
-    opponent.setPosition(isLeft ? 600 : 200, 500);
-  }
+  positionPlayersForSpawn();
 
   isPunching = false;
   isGuarding = false;
@@ -193,6 +315,10 @@ function resetGame() {
   resultText.setText("");
 
   sendPlayerUpdate(true);
+
+  restartRequestPending = false;
+  isRoundStarting = false;
+  controlsLocked = false;
 }
 
 function sendPlayerUpdate(force = false) {
@@ -226,33 +352,92 @@ socket.on("restartGame", () => {
 
 socket.on("yourId", (id) => {
   myId = id;
-
-  if (opponentId) {
-    isLeft = myId < opponentId;
+  if (player) {
+    positionPlayersForSpawn();
+    sendPlayerUpdate(true);
   }
 });
 
+socket.on("spawnInfo", ({ id, spawnIndex: incomingSpawn }) => {
+  if (typeof incomingSpawn !== "number") {
+    return;
+  }
+
+  if (id === myId) {
+    spawnIndex = incomingSpawn;
+    if (player) {
+      positionPlayersForSpawn();
+      sendPlayerUpdate(true);
+    }
+    return;
+  }
+
+  if (!opponentId || opponentId !== id) {
+    opponentId = id;
+    hasOpponent = true;
+    if (waitingText) {
+      waitingText.setVisible(false);
+    }
+  }
+
+  opponentSpawnIndex = incomingSpawn;
+  positionPlayersForSpawn();
+});
+
 function startCountdownAndReset() {
-  const countdownText = game.scene.scenes[0].add.text(400, 300, "", {
-    fontSize: "64px",
-    color: "#000",
-    fontStyle: "bold"
-  }).setOrigin(0.5);
+  if (isRoundStarting) {
+    return;
+  }
+
+  const scene = game.scene.scenes[0];
+  if (!scene) {
+    return;
+  }
+
+  isRoundStarting = true;
+  controlsLocked = true;
+  restartRequestPending = false;
+
+  if (restartUnlockTimeoutId !== null) {
+    clearTimeout(restartUnlockTimeoutId);
+    restartUnlockTimeoutId = null;
+  }
+
+  if (countdownTimerId !== null) {
+    clearInterval(countdownTimerId);
+    countdownTimerId = null;
+  }
+
+  const countdownText = scene
+    .add.text(400, 300, "", {
+      fontSize: "64px",
+      color: "#000",
+      fontStyle: "bold",
+    })
+    .setOrigin(0.5);
 
   let count = 3;
   countdownText.setText(count);
 
-  const timer = setInterval(() => {
-    count--;
+  countdownTimerId = window.setInterval(() => {
+    count -= 1;
+
     if (count > 0) {
       countdownText.setText(count);
-    } else if (count === 0) {
-      countdownText.setText("FIGHT!");
-    } else {
-      countdownText.destroy();
-      clearInterval(timer);
-      resetGame();
+      return;
     }
+
+    if (count === 0) {
+      countdownText.setText("FIGHT!");
+      return;
+    }
+
+    countdownText.destroy();
+    if (countdownTimerId !== null) {
+      clearInterval(countdownTimerId);
+      countdownTimerId = null;
+    }
+    resetGame();
   }, 1000);
 }
 
@@ -308,6 +493,31 @@ function create() {
 
   projectileKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Z);
   this.input.keyboard.on("keydown-R", () => {
+    if (restartRequestPending || isRoundStarting) {
+      return;
+    }
+
+    restartRequestPending = true;
+    controlsLocked = true;
+    if (player) {
+      player.setVelocityX(0);
+      player.setVelocityY(0);
+    }
+
+    if (restartUnlockTimeoutId !== null) {
+      clearTimeout(restartUnlockTimeoutId);
+    }
+
+    restartUnlockTimeoutId = window.setTimeout(() => {
+      restartUnlockTimeoutId = null;
+      if (isRoundStarting) {
+        return;
+      }
+
+      controlsLocked = false;
+      restartRequestPending = false;
+    }, 1500);
+
     socket.emit("restart");
   });
 
@@ -320,10 +530,8 @@ function create() {
     if (!opponentId && attackerId) {
       opponentId = attackerId;
       hasOpponent = true;
-      waitingText.setVisible(false);
-
-      if (myId) {
-        isLeft = myId < opponentId;
+      if (waitingText) {
+        waitingText.setVisible(false);
       }
     }
 
@@ -331,68 +539,135 @@ function create() {
       return;
     }
 
-    opponentIsPunching = true;
-    setTimeout(() => {
-      opponentIsPunching = false;
-    }, 200);
+    const triggerPunch = () => {
+      opponentIsPunching = true;
+      window.setTimeout(() => {
+        opponentIsPunching = false;
+      }, 200);
+    };
+
+    if (displayLagMs > 0) {
+      scheduleWithLag(triggerPunch);
+    } else {
+      triggerPunch();
+    }
   });
 
-  socket.on(
-    "playerUpdate",
-    ({ id, x, y, hp: incomingHp, guarding, color, name, projectilesRemaining }) => {
-      if (!id) {
-        return;
+  socket.on("playerUpdate", (data = {}) => {
+    const {
+      id,
+      x,
+      y,
+      hp: incomingHp,
+      guarding,
+      color,
+      name,
+      projectilesRemaining,
+      spawnIndex: incomingSpawn,
+    } = data;
+
+    if (!id) {
+      return;
+    }
+
+    if (id === myId) {
+      if (typeof incomingHp === "number") {
+        hp = incomingHp;
       }
-
-      if (id === myId) {
-        if (typeof incomingHp === "number") {
-          hp = incomingHp;
-        }
-        if (typeof projectilesRemaining === "number") {
-          hadoukenRemaining = projectilesRemaining;
-        }
-        return;
-      }
-
-      if (!opponentId || opponentId !== id) {
-        opponentId = id;
-        hasOpponent = true;
-        waitingText.setVisible(false);
-
-        if (myId) {
-          isLeft = myId < opponentId;
-        }
-      }
-
-      if (typeof x === "number") {
-        opponent.x = x;
-      }
-
-      if (typeof y === "number") {
-        opponent.y = y;
-      }
-      opponentHp = typeof incomingHp === "number" ? incomingHp : opponentHp;
-      opponentIsGuarding = Boolean(guarding);
-
-      if (typeof color === "number") {
-        opponentColor = color;
-      }
-
-      if (typeof name === "string") {
-        opponentName = name;
-      }
-
       if (typeof projectilesRemaining === "number") {
-        opponentHadoukenRemaining = projectilesRemaining;
+        hadoukenRemaining = projectilesRemaining;
+      }
+      if (typeof incomingSpawn === "number" && spawnIndex !== incomingSpawn) {
+        spawnIndex = incomingSpawn;
+        positionPlayersForSpawn();
+      }
+      return;
+    }
+
+    if (!opponentId || opponentId !== id) {
+      opponentId = id;
+      hasOpponent = true;
+      if (waitingText) {
+        waitingText.setVisible(false);
       }
     }
-  );
+
+    const stateForLag = {
+      x,
+      y,
+      incomingHp,
+      guarding,
+      color,
+      name,
+      projectilesRemaining,
+      incomingSpawn,
+    };
+
+    const applyOpponentState = (state) => {
+      if (!opponent) {
+        return;
+      }
+
+      const {
+        x: nextX,
+        y: nextY,
+        incomingHp: nextHp,
+        guarding: nextGuarding,
+        color: nextColor,
+        name: nextName,
+        projectilesRemaining: nextProjectiles,
+        incomingSpawn: nextSpawn,
+      } = state;
+
+      if (typeof nextSpawn === "number" && opponentSpawnIndex !== nextSpawn) {
+        opponentSpawnIndex = nextSpawn;
+        positionPlayersForSpawn();
+      }
+
+      if (typeof nextX === "number") {
+        opponent.x = nextX;
+      }
+
+      if (typeof nextY === "number") {
+        opponent.y = nextY;
+      }
+
+      opponentHp = typeof nextHp === "number" ? nextHp : opponentHp;
+      opponentIsGuarding = Boolean(nextGuarding);
+
+      if (typeof nextColor === "number") {
+        opponentColor = nextColor;
+      }
+
+      if (typeof nextName === "string") {
+        opponentName = nextName;
+      }
+
+      if (typeof nextProjectiles === "number") {
+        opponentHadoukenRemaining = nextProjectiles;
+      }
+    };
+
+    if (displayLagMs > 0) {
+      scheduleWithLag(() => applyOpponentState(stateForLag));
+    } else {
+      applyOpponentState(stateForLag);
+    }
+  });
 
   socket.on("projectileFired", (data) => {
     if (!data || !data.shooterId) {
       return;
     }
-    spawnProjectile(scene, data);
+
+    const spawnAction = () => spawnProjectile(scene, data);
+
+    if (data.shooterId === myId || displayLagMs <= 0) {
+      spawnAction();
+      return;
+    }
+
+    scheduleWithLag(spawnAction);
   });
 
   socket.on("attacked", (data) => {
@@ -405,6 +680,7 @@ function create() {
     gameOver = true;
   });
 
+  positionPlayersForSpawn();
   sendPlayerUpdate();
 }
 
@@ -500,8 +776,9 @@ function updateProjectiles(delta) {
       target.x,
       target.y
     );
+    const verticalDiff = Math.abs(proj.sprite.y - target.y);
 
-    if (distance < 40) {
+    if (distance < 40 && verticalDiff <= PROJECTILE_VERTICAL_TOLERANCE) {
       proj.sprite.destroy();
       projectiles.splice(i, 1);
     }
@@ -539,7 +816,9 @@ function update(_time, delta) {
   playerNameText.setVisible(Boolean(playerName));
   opponentNameText.setVisible(hasOpponent && Boolean(opponentName));
 
-  const guardKeyDown = cursors.shift.isDown;
+  const controlsDisabled = controlsLocked || !hasSelectedColor;
+
+  const guardKeyDown = !controlsDisabled && cursors.shift.isDown;
   const previousGuarding = wasGuarding;
   let nextIsGuarding = false;
 
@@ -577,7 +856,9 @@ function update(_time, delta) {
 
   let moved = false;
 
-  if (isGuarding) {
+  if (controlsDisabled) {
+    player.setVelocityX(0);
+  } else if (isGuarding) {
     player.setVelocityX(0);
   } else if (cursors.left.isDown) {
     player.setVelocityX(-160);
@@ -589,12 +870,13 @@ function update(_time, delta) {
     player.setVelocityX(0);
   }
 
-  if (!isGuarding && cursors.up.isDown && player.body.blocked.down) {
+  if (!controlsDisabled && !isGuarding && cursors.up.isDown && player.body.blocked.down) {
     player.setVelocityY(-400);
     moved = true;
   }
 
   if (
+    !controlsDisabled &&
     Phaser.Input.Keyboard.JustDown(cursors.space) &&
     !isPunching &&
     !isGuarding
@@ -606,6 +888,7 @@ function update(_time, delta) {
   }
 
   if (
+    !controlsDisabled &&
     Phaser.Input.Keyboard.JustDown(projectileKey) &&
     hadoukenRemaining > 0 &&
     !isGuarding &&
@@ -619,8 +902,9 @@ function update(_time, delta) {
 
   if (
     moved ||
-    Phaser.Input.Keyboard.JustDown(cursors.shift) ||
-    Phaser.Input.Keyboard.JustUp(cursors.shift) ||
+    (!controlsDisabled &&
+      (Phaser.Input.Keyboard.JustDown(cursors.shift) ||
+        Phaser.Input.Keyboard.JustUp(cursors.shift))) ||
     guardStateChanged
   ) {
     sendPlayerUpdate();

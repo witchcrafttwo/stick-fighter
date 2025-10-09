@@ -5,10 +5,10 @@
 　　`client/script.js`の19行目をサーバーを立てるPCのローカル(プライベート)IPに変更してください
 
    `server`側　cmd　
-    ```bash
+    ```
         npm run dev
     ```
     `client`側　cmd
-    ```bash
+    ```
     node server.js
     ```
