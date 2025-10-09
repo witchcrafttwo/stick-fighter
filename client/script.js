@@ -112,6 +112,11 @@ let displayLagMs = 0;
 const laggedTimeouts = new Set();
 let latestPing = null;
 let pingIntervalId = null;
+let isRoundStarting = false;
+let restartRequestPending = false;
+let controlsLocked = false;
+let countdownTimerId = null;
+let restartUnlockTimeoutId = null;
 
 const updateStartButtonState = () => {
   const hasName = nameInput.value.trim().length > 0;
@@ -295,6 +300,16 @@ socket.on("latencyPong", ({ clientTime } = {}) => {
 function preload() {}
 
 function resetGame() {
+  if (countdownTimerId !== null) {
+    clearInterval(countdownTimerId);
+    countdownTimerId = null;
+  }
+
+  if (restartUnlockTimeoutId !== null) {
+    clearTimeout(restartUnlockTimeoutId);
+    restartUnlockTimeoutId = null;
+  }
+
   gameOver = false;
   hp = 100;
   opponentHp = 100;
@@ -324,6 +339,10 @@ function resetGame() {
   resultText.setText("");
 
   sendPlayerUpdate(true);
+
+  restartRequestPending = false;
+  isRoundStarting = false;
+  controlsLocked = false;
 }
 
 function sendPlayerUpdate(force = false) {
@@ -390,26 +409,59 @@ socket.on("spawnInfo", ({ id, spawnIndex: incomingSpawn }) => {
 });
 
 function startCountdownAndReset() {
-  const countdownText = game.scene.scenes[0].add.text(400, 300, "", {
-    fontSize: "64px",
-    color: "#000",
-    fontStyle: "bold"
-  }).setOrigin(0.5);
+  if (isRoundStarting) {
+    return;
+  }
+
+  const scene = game.scene.scenes[0];
+  if (!scene) {
+    return;
+  }
+
+  isRoundStarting = true;
+  controlsLocked = true;
+  restartRequestPending = false;
+
+  if (restartUnlockTimeoutId !== null) {
+    clearTimeout(restartUnlockTimeoutId);
+    restartUnlockTimeoutId = null;
+  }
+
+  if (countdownTimerId !== null) {
+    clearInterval(countdownTimerId);
+    countdownTimerId = null;
+  }
+
+  const countdownText = scene
+    .add.text(400, 300, "", {
+      fontSize: "64px",
+      color: "#000",
+      fontStyle: "bold",
+    })
+    .setOrigin(0.5);
 
   let count = 3;
   countdownText.setText(count);
 
-  const timer = setInterval(() => {
-    count--;
+  countdownTimerId = window.setInterval(() => {
+    count -= 1;
+
     if (count > 0) {
       countdownText.setText(count);
-    } else if (count === 0) {
-      countdownText.setText("FIGHT!");
-    } else {
-      countdownText.destroy();
-      clearInterval(timer);
-      resetGame();
+      return;
     }
+
+    if (count === 0) {
+      countdownText.setText("FIGHT!");
+      return;
+    }
+
+    countdownText.destroy();
+    if (countdownTimerId !== null) {
+      clearInterval(countdownTimerId);
+      countdownTimerId = null;
+    }
+    resetGame();
   }, 1000);
 }
 
@@ -465,6 +517,31 @@ function create() {
 
   projectileKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Z);
   this.input.keyboard.on("keydown-R", () => {
+    if (restartRequestPending || isRoundStarting) {
+      return;
+    }
+
+    restartRequestPending = true;
+    controlsLocked = true;
+    if (player) {
+      player.setVelocityX(0);
+      player.setVelocityY(0);
+    }
+
+    if (restartUnlockTimeoutId !== null) {
+      clearTimeout(restartUnlockTimeoutId);
+    }
+
+    restartUnlockTimeoutId = window.setTimeout(() => {
+      restartUnlockTimeoutId = null;
+      if (isRoundStarting) {
+        return;
+      }
+
+      controlsLocked = false;
+      restartRequestPending = false;
+    }, 1500);
+
     socket.emit("restart");
   });
 
@@ -763,7 +840,9 @@ function update(_time, delta) {
   playerNameText.setVisible(Boolean(playerName));
   opponentNameText.setVisible(hasOpponent && Boolean(opponentName));
 
-  const guardKeyDown = cursors.shift.isDown;
+  const controlsDisabled = controlsLocked || !hasSelectedColor;
+
+  const guardKeyDown = !controlsDisabled && cursors.shift.isDown;
   const previousGuarding = wasGuarding;
   let nextIsGuarding = false;
 
@@ -801,7 +880,9 @@ function update(_time, delta) {
 
   let moved = false;
 
-  if (isGuarding) {
+  if (controlsDisabled) {
+    player.setVelocityX(0);
+  } else if (isGuarding) {
     player.setVelocityX(0);
   } else if (cursors.left.isDown) {
     player.setVelocityX(-160);
@@ -813,12 +894,13 @@ function update(_time, delta) {
     player.setVelocityX(0);
   }
 
-  if (!isGuarding && cursors.up.isDown && player.body.blocked.down) {
+  if (!controlsDisabled && !isGuarding && cursors.up.isDown && player.body.blocked.down) {
     player.setVelocityY(-400);
     moved = true;
   }
 
   if (
+    !controlsDisabled &&
     Phaser.Input.Keyboard.JustDown(cursors.space) &&
     !isPunching &&
     !isGuarding
@@ -830,6 +912,7 @@ function update(_time, delta) {
   }
 
   if (
+    !controlsDisabled &&
     Phaser.Input.Keyboard.JustDown(projectileKey) &&
     hadoukenRemaining > 0 &&
     !isGuarding &&
@@ -843,8 +926,9 @@ function update(_time, delta) {
 
   if (
     moved ||
-    Phaser.Input.Keyboard.JustDown(cursors.shift) ||
-    Phaser.Input.Keyboard.JustUp(cursors.shift) ||
+    (!controlsDisabled &&
+      (Phaser.Input.Keyboard.JustDown(cursors.shift) ||
+        Phaser.Input.Keyboard.JustUp(cursors.shift))) ||
     guardStateChanged
   ) {
     sendPlayerUpdate();

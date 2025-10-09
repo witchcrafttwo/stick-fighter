@@ -10,6 +10,7 @@ const PROJECTILE_SPEED = 520;
 const PROJECTILE_LIFETIME = 2200;
 const PROJECTILE_VERTICAL_TOLERANCE = 60;
 const PROJECTILE_RANGE = 800;
+const RESTART_COOLDOWN_MS = 3500;
 
 const SPAWN_POSITIONS = [
   { x: 200, y: 500 },
@@ -33,6 +34,8 @@ function getAvailableSpawnIndex() {
 }
 
 const players = {};
+
+let restartCooldownUntil = 0;
 
 io.on('connection', socket => {
   console.log(`Player connected: ${socket.id}`);
@@ -142,6 +145,13 @@ io.on('connection', socket => {
   });
 
   socket.on('restart', () => {
+    const now = Date.now();
+    if (now < restartCooldownUntil) {
+      return;
+    }
+
+    restartCooldownUntil = now + RESTART_COOLDOWN_MS;
+
     Object.keys(players).forEach((id) => {
       if (!players[id]) {
         return;
