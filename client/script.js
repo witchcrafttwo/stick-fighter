@@ -16,7 +16,7 @@ const resolveSocketUrl = () => {
   return `${protocol}//${hostname}${port ? `:${port}` : ''}`;
 };
 
-const socket = io("http://192.168.148.180:3000", );
+const socket = io("http://192.168.10.112:3000", );
 
 const COLORS = [
   { hex: '#000000', label: 'ブラック' },
@@ -106,7 +106,7 @@ let wasGuarding = false;
 let projectiles = [];
 let spawnIndex = null;
 let opponentSpawnIndex = null;
-const DEFAULT_DISPLAY_LAG_MS = 0; // 手動で変更したい場合はここの値を書き換えてください
+const DEFAULT_DISPLAY_LAG_MS = 100;
 let displayLagMs = DEFAULT_DISPLAY_LAG_MS;
 const laggedTimeouts = new Set();
 let latestPing = null;
