@@ -31,6 +31,9 @@ const colorSelectionOverlay = document.getElementById('color-selection');
 const colorOptionsContainer = document.getElementById('color-options');
 const nameInput = document.getElementById('player-name');
 const startButton = document.getElementById('start-game');
+const lagSlider = document.getElementById('lag-slider');
+const lagValueLabel = document.getElementById('lag-value');
+const pingValueLabel = document.getElementById('ping-value');
 
 const hexToNumber = (hex) => parseInt(hex.replace('#', ''), 16);
 
@@ -39,6 +42,12 @@ const PROJECTILE_SPEED = 520;
 const PROJECTILE_LIFETIME = 2200;
 const GUARD_MAX_DURATION = 3000;
 const GUARD_COOLDOWN = 1000;
+const PROJECTILE_VERTICAL_TOLERANCE = 60;
+const SPAWN_POSITIONS = [
+  { x: 200, y: 500 },
+  { x: 600, y: 500 },
+];
+const PING_INTERVAL_MS = 4000;
 
 const config = {
   type: Phaser.AUTO,
@@ -97,6 +106,12 @@ let guardStartTime = 0;
 let guardCooldownUntil = 0;
 let wasGuarding = false;
 let projectiles = [];
+let spawnIndex = null;
+let opponentSpawnIndex = null;
+let displayLagMs = 0;
+const laggedTimeouts = new Set();
+let latestPing = null;
+let pingIntervalId = null;
 
 const updateStartButtonState = () => {
   const hasName = nameInput.value.trim().length > 0;
@@ -158,6 +173,125 @@ startButton.addEventListener('click', () => {
 
 updateStartButtonState();
 
+const clampLagValue = (value) => {
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) {
+    return 0;
+  }
+  return Math.min(300, Math.max(0, Math.round(numeric)));
+};
+
+const updateLagSetting = (value) => {
+  const clamped = clampLagValue(value);
+  displayLagMs = clamped;
+  if (lagValueLabel) {
+    lagValueLabel.textContent = clamped.toString();
+  }
+};
+
+if (lagSlider) {
+  updateLagSetting(lagSlider.value);
+  lagSlider.addEventListener('input', (event) => {
+    updateLagSetting(event.target.value);
+  });
+}
+
+const updatePingLabel = (value) => {
+  if (!pingValueLabel) {
+    return;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    pingValueLabel.textContent = `${Math.round(value)}`;
+  } else {
+    pingValueLabel.textContent = '--';
+  }
+};
+
+const scheduleWithLag = (callback) => {
+  if (displayLagMs <= 0) {
+    callback();
+    return;
+  }
+
+  const timeoutId = window.setTimeout(() => {
+    laggedTimeouts.delete(timeoutId);
+    callback();
+  }, displayLagMs);
+
+  laggedTimeouts.add(timeoutId);
+};
+
+const clearLaggedTimeouts = () => {
+  laggedTimeouts.forEach((timeoutId) => {
+    window.clearTimeout(timeoutId);
+  });
+  laggedTimeouts.clear();
+};
+
+const positionPlayersForSpawn = () => {
+  if (!player || !opponent) {
+    return;
+  }
+
+  const myIndex = typeof spawnIndex === 'number' ? spawnIndex : 0;
+  const opponentIndex =
+    typeof opponentSpawnIndex === 'number'
+      ? opponentSpawnIndex
+      : myIndex === 0
+        ? 1
+        : 0;
+
+  const mySpawn = SPAWN_POSITIONS[myIndex] ?? SPAWN_POSITIONS[0];
+  const opponentSpawn = SPAWN_POSITIONS[opponentIndex] ?? SPAWN_POSITIONS[1] ?? SPAWN_POSITIONS[0];
+
+  player.setPosition(mySpawn.x, mySpawn.y);
+  opponent.setPosition(opponentSpawn.x, opponentSpawn.y);
+
+  if (player.body) {
+    player.body.setVelocity(0, 0);
+  }
+  if (opponent.body) {
+    opponent.body.setVelocity(0, 0);
+  }
+
+  isLeft = myIndex === 0;
+};
+
+const ensurePingInterval = () => {
+  if (pingIntervalId !== null) {
+    return;
+  }
+
+  pingIntervalId = window.setInterval(() => {
+    if (!socket.connected) {
+      return;
+    }
+
+    socket.emit('latencyTest', { clientTime: performance.now() });
+  }, PING_INTERVAL_MS);
+};
+
+ensurePingInterval();
+
+socket.on("connect", () => {
+  updatePingLabel(latestPing);
+  socket.emit("latencyTest", { clientTime: performance.now() });
+});
+
+socket.on("disconnect", () => {
+  updatePingLabel(null);
+});
+
+socket.on("latencyPong", ({ clientTime } = {}) => {
+  if (typeof clientTime !== "number") {
+    return;
+  }
+
+  latestPing = Math.max(0, performance.now() - clientTime);
+  updatePingLabel(latestPing);
+});
+
 function preload() {}
 
 function resetGame() {
@@ -170,6 +304,7 @@ function resetGame() {
   guardCooldownUntil = 0;
   guardStartTime = 0;
   wasGuarding = false;
+  clearLaggedTimeouts();
 
   projectiles.forEach((proj) => {
     proj.sprite.destroy();
@@ -180,11 +315,7 @@ function resetGame() {
     guardCooldownText.setText("");
   }
 
-  if (myId && opponentId) {
-    isLeft = myId < opponentId;
-    player.setPosition(isLeft ? 200 : 600, 500);
-    opponent.setPosition(isLeft ? 600 : 200, 500);
-  }
+  positionPlayersForSpawn();
 
   isPunching = false;
   isGuarding = false;
@@ -226,10 +357,36 @@ socket.on("restartGame", () => {
 
 socket.on("yourId", (id) => {
   myId = id;
-
-  if (opponentId) {
-    isLeft = myId < opponentId;
+  if (player) {
+    positionPlayersForSpawn();
+    sendPlayerUpdate(true);
   }
+});
+
+socket.on("spawnInfo", ({ id, spawnIndex: incomingSpawn }) => {
+  if (typeof incomingSpawn !== "number") {
+    return;
+  }
+
+  if (id === myId) {
+    spawnIndex = incomingSpawn;
+    if (player) {
+      positionPlayersForSpawn();
+      sendPlayerUpdate(true);
+    }
+    return;
+  }
+
+  if (!opponentId || opponentId !== id) {
+    opponentId = id;
+    hasOpponent = true;
+    if (waitingText) {
+      waitingText.setVisible(false);
+    }
+  }
+
+  opponentSpawnIndex = incomingSpawn;
+  positionPlayersForSpawn();
 });
 
 function startCountdownAndReset() {
@@ -320,10 +477,8 @@ function create() {
     if (!opponentId && attackerId) {
       opponentId = attackerId;
       hasOpponent = true;
-      waitingText.setVisible(false);
-
-      if (myId) {
-        isLeft = myId < opponentId;
+      if (waitingText) {
+        waitingText.setVisible(false);
       }
     }
 
@@ -331,68 +486,135 @@ function create() {
       return;
     }
 
-    opponentIsPunching = true;
-    setTimeout(() => {
-      opponentIsPunching = false;
-    }, 200);
+    const triggerPunch = () => {
+      opponentIsPunching = true;
+      window.setTimeout(() => {
+        opponentIsPunching = false;
+      }, 200);
+    };
+
+    if (displayLagMs > 0) {
+      scheduleWithLag(triggerPunch);
+    } else {
+      triggerPunch();
+    }
   });
 
-  socket.on(
-    "playerUpdate",
-    ({ id, x, y, hp: incomingHp, guarding, color, name, projectilesRemaining }) => {
-      if (!id) {
-        return;
+  socket.on("playerUpdate", (data = {}) => {
+    const {
+      id,
+      x,
+      y,
+      hp: incomingHp,
+      guarding,
+      color,
+      name,
+      projectilesRemaining,
+      spawnIndex: incomingSpawn,
+    } = data;
+
+    if (!id) {
+      return;
+    }
+
+    if (id === myId) {
+      if (typeof incomingHp === "number") {
+        hp = incomingHp;
       }
-
-      if (id === myId) {
-        if (typeof incomingHp === "number") {
-          hp = incomingHp;
-        }
-        if (typeof projectilesRemaining === "number") {
-          hadoukenRemaining = projectilesRemaining;
-        }
-        return;
-      }
-
-      if (!opponentId || opponentId !== id) {
-        opponentId = id;
-        hasOpponent = true;
-        waitingText.setVisible(false);
-
-        if (myId) {
-          isLeft = myId < opponentId;
-        }
-      }
-
-      if (typeof x === "number") {
-        opponent.x = x;
-      }
-
-      if (typeof y === "number") {
-        opponent.y = y;
-      }
-      opponentHp = typeof incomingHp === "number" ? incomingHp : opponentHp;
-      opponentIsGuarding = Boolean(guarding);
-
-      if (typeof color === "number") {
-        opponentColor = color;
-      }
-
-      if (typeof name === "string") {
-        opponentName = name;
-      }
-
       if (typeof projectilesRemaining === "number") {
-        opponentHadoukenRemaining = projectilesRemaining;
+        hadoukenRemaining = projectilesRemaining;
+      }
+      if (typeof incomingSpawn === "number" && spawnIndex !== incomingSpawn) {
+        spawnIndex = incomingSpawn;
+        positionPlayersForSpawn();
+      }
+      return;
+    }
+
+    if (!opponentId || opponentId !== id) {
+      opponentId = id;
+      hasOpponent = true;
+      if (waitingText) {
+        waitingText.setVisible(false);
       }
     }
-  );
+
+    const stateForLag = {
+      x,
+      y,
+      incomingHp,
+      guarding,
+      color,
+      name,
+      projectilesRemaining,
+      incomingSpawn,
+    };
+
+    const applyOpponentState = (state) => {
+      if (!opponent) {
+        return;
+      }
+
+      const {
+        x: nextX,
+        y: nextY,
+        incomingHp: nextHp,
+        guarding: nextGuarding,
+        color: nextColor,
+        name: nextName,
+        projectilesRemaining: nextProjectiles,
+        incomingSpawn: nextSpawn,
+      } = state;
+
+      if (typeof nextSpawn === "number" && opponentSpawnIndex !== nextSpawn) {
+        opponentSpawnIndex = nextSpawn;
+        positionPlayersForSpawn();
+      }
+
+      if (typeof nextX === "number") {
+        opponent.x = nextX;
+      }
+
+      if (typeof nextY === "number") {
+        opponent.y = nextY;
+      }
+
+      opponentHp = typeof nextHp === "number" ? nextHp : opponentHp;
+      opponentIsGuarding = Boolean(nextGuarding);
+
+      if (typeof nextColor === "number") {
+        opponentColor = nextColor;
+      }
+
+      if (typeof nextName === "string") {
+        opponentName = nextName;
+      }
+
+      if (typeof nextProjectiles === "number") {
+        opponentHadoukenRemaining = nextProjectiles;
+      }
+    };
+
+    if (displayLagMs > 0) {
+      scheduleWithLag(() => applyOpponentState(stateForLag));
+    } else {
+      applyOpponentState(stateForLag);
+    }
+  });
 
   socket.on("projectileFired", (data) => {
     if (!data || !data.shooterId) {
       return;
     }
-    spawnProjectile(scene, data);
+
+    const spawnAction = () => spawnProjectile(scene, data);
+
+    if (data.shooterId === myId || displayLagMs <= 0) {
+      spawnAction();
+      return;
+    }
+
+    scheduleWithLag(spawnAction);
   });
 
   socket.on("attacked", (data) => {
@@ -405,6 +627,7 @@ function create() {
     gameOver = true;
   });
 
+  positionPlayersForSpawn();
   sendPlayerUpdate();
 }
 
@@ -500,8 +723,9 @@ function updateProjectiles(delta) {
       target.x,
       target.y
     );
+    const verticalDiff = Math.abs(proj.sprite.y - target.y);
 
-    if (distance < 40) {
+    if (distance < 40 && verticalDiff <= PROJECTILE_VERTICAL_TOLERANCE) {
       proj.sprite.destroy();
       projectiles.splice(i, 1);
     }
