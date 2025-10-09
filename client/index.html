@@ -136,7 +136,7 @@
       color: #666;
     }
 
-    .lag-controls {
+    .status-panel {
       position: fixed;
       top: 16px;
       right: 16px;
@@ -144,27 +144,14 @@
       border-radius: 12px;
       background: rgba(255, 255, 255, 0.92);
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
-      min-width: 220px;
+      min-width: 160px;
       z-index: 5;
       font-size: 14px;
       color: #222;
     }
 
-    .lag-controls label {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      font-weight: 600;
-      margin-bottom: 8px;
-    }
-
-    .lag-controls input[type="range"] {
-      width: 100%;
-    }
-
     .ping-display {
-      margin-top: 6px;
+      font-weight: 600;
       font-size: 13px;
       color: #444;
       display: flex;
@@ -174,12 +161,7 @@
   </style>
 </head>
 <body>
-  <div id="lag-controls" class="lag-controls">
-    <label for="lag-slider">
-      画面ラグ
-      <span><span id="lag-value">0</span>ms</span>
-    </label>
-    <input id="lag-slider" type="range" min="0" max="300" value="0" step="10" />
+  <div id="status-panel" class="status-panel">
     <div class="ping-display">
       <span>Ping</span>
       <span id="ping-value">--</span>

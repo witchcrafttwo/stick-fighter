@@ -31,8 +31,6 @@ const colorSelectionOverlay = document.getElementById('color-selection');
 const colorOptionsContainer = document.getElementById('color-options');
 const nameInput = document.getElementById('player-name');
 const startButton = document.getElementById('start-game');
-const lagSlider = document.getElementById('lag-slider');
-const lagValueLabel = document.getElementById('lag-value');
 const pingValueLabel = document.getElementById('ping-value');
 
 const hexToNumber = (hex) => parseInt(hex.replace('#', ''), 16);
@@ -108,7 +106,8 @@ let wasGuarding = false;
 let projectiles = [];
 let spawnIndex = null;
 let opponentSpawnIndex = null;
-let displayLagMs = 0;
+const DEFAULT_DISPLAY_LAG_MS = 0; // 手動で変更したい場合はここの値を書き換えてください
+let displayLagMs = DEFAULT_DISPLAY_LAG_MS;
 const laggedTimeouts = new Set();
 let latestPing = null;
 let pingIntervalId = null;
@@ -177,29 +176,6 @@ startButton.addEventListener('click', () => {
 });
 
 updateStartButtonState();
-
-const clampLagValue = (value) => {
-  const numeric = Number(value);
-  if (Number.isNaN(numeric)) {
-    return 0;
-  }
-  return Math.min(300, Math.max(0, Math.round(numeric)));
-};
-
-const updateLagSetting = (value) => {
-  const clamped = clampLagValue(value);
-  displayLagMs = clamped;
-  if (lagValueLabel) {
-    lagValueLabel.textContent = clamped.toString();
-  }
-};
-
-if (lagSlider) {
-  updateLagSetting(lagSlider.value);
-  lagSlider.addEventListener('input', (event) => {
-    updateLagSetting(event.target.value);
-  });
-}
 
 const updatePingLabel = (value) => {
   if (!pingValueLabel) {
