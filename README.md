@@ -8,7 +8,9 @@
     ```
         npm run dev
     ```
-    `client`側　cmd
+   `client`側　cmd
     ```
     node server.js
     ```
+
+### ラグをいじる設定はscript.jsの109行目にあります
