@@ -1,7 +1,102 @@
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import { readFile } from 'fs/promises';
+import { extname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 
-const httpServer = createServer();
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const clientDistPath = resolve(__dirname, '../client/dist');
+
+const mimeTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+const serveIndexHtml = async (res, method = 'GET') => {
+  const indexPath = resolve(clientDistPath, 'index.html');
+  const html = await readFile(indexPath);
+  res.writeHead(200, { 'Content-Type': mimeTypes['.html'] });
+  if (method === 'HEAD') {
+    res.end();
+    return;
+  }
+  res.end(html);
+};
+
+const httpServer = createServer(async (req, res) => {
+  if (!req?.url) {
+    res.writeHead(400, { 'Content-Type': mimeTypes['.txt'] });
+    res.end('Bad Request');
+    return;
+  }
+
+  const method = req.method ?? 'GET';
+
+  if (req.url.startsWith('/socket.io/')) {
+    return;
+  }
+
+  if (method !== 'GET' && method !== 'HEAD') {
+    res.writeHead(405, { 'Content-Type': mimeTypes['.txt'] });
+    res.end('Method Not Allowed');
+    return;
+  }
+
+  const requestUrl = new URL(req.url, 'http://localhost');
+  let pathname = decodeURIComponent(requestUrl.pathname);
+
+  if (pathname.endsWith('/')) {
+    pathname = `${pathname}index.html`;
+  }
+
+  if (pathname === '/') {
+    pathname = '/index.html';
+  }
+
+  const filePath = resolve(clientDistPath, `.${pathname}`);
+
+  if (!filePath.startsWith(clientDistPath)) {
+    res.writeHead(403, { 'Content-Type': mimeTypes['.txt'] });
+    res.end('Forbidden');
+    return;
+  }
+
+  try {
+    const file = await readFile(filePath);
+    const extension = extname(filePath);
+    const contentType = mimeTypes[extension] ?? 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': contentType });
+    if (method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(file);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      try {
+        await serveIndexHtml(res, method);
+      } catch (indexError) {
+        if (indexError?.code === 'ENOENT') {
+          res.writeHead(404, { 'Content-Type': mimeTypes['.txt'] });
+          res.end('Client build not found. Run "npm install && npm run build" inside the client directory.');
+        } else {
+          res.writeHead(500, { 'Content-Type': mimeTypes['.txt'] });
+          res.end('Internal Server Error');
+        }
+      }
+    } else {
+      res.writeHead(500, { 'Content-Type': mimeTypes['.txt'] });
+      res.end('Internal Server Error');
+    }
+  }
+});
+
 const io = new Server(httpServer, { cors: { origin: "*" } });
 
 const DEFAULT_PROJECTILES = 5;
@@ -10,16 +105,84 @@ const PROJECTILE_SPEED = 520;
 const PROJECTILE_LIFETIME = 2200;
 const PROJECTILE_VERTICAL_TOLERANCE = 60;
 const PROJECTILE_RANGE = 800;
-const RESTART_COOLDOWN_MS = 3500;
+const ROUND_COUNTDOWN_DURATION_MS = 4000;
 
 const SPAWN_POSITIONS = [
   { x: 200, y: 500 },
   { x: 600, y: 500 },
 ];
 
-function getAvailableSpawnIndex() {
+const rooms = new Map();
+
+const formatRoomList = () =>
+  Array.from(rooms.entries()).map(([id, room]) => ({
+    id,
+    playerCount: room.players.size,
+    readyCount: room.readyPlayers.size,
+    capacity: SPAWN_POSITIONS.length,
+  }));
+
+const broadcastRoomList = () => {
+  io.emit('roomList', { rooms: formatRoomList() });
+};
+
+const sanitizeRoomId = (rawRoomId) => {
+  if (typeof rawRoomId !== 'string') {
+    return '';
+  }
+
+  const trimmed = rawRoomId.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  return trimmed.slice(0, 32);
+};
+
+const getOrCreateRoom = (roomId) => {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, {
+      players: new Map(),
+      readyPlayers: new Set(),
+      countdownTimer: null,
+      roundStarting: false,
+    });
+  }
+
+  return rooms.get(roomId);
+};
+
+const deleteRoomIfEmpty = (roomId) => {
+  const room = rooms.get(roomId);
+  if (!room) {
+    return;
+  }
+
+  if (room.players.size === 0) {
+    if (room.countdownTimer) {
+      clearTimeout(room.countdownTimer);
+    }
+    rooms.delete(roomId);
+  }
+};
+
+const getRoomForSocket = (socket) => {
+  const roomId = socket.data?.roomId;
+  if (!roomId) {
+    return null;
+  }
+
+  const room = rooms.get(roomId);
+  if (!room) {
+    return null;
+  }
+
+  return { roomId, room };
+};
+
+const getAvailableSpawnIndex = (room) => {
   const occupiedIndexes = new Set(
-    Object.values(players)
+    Array.from(room.players.values())
       .map((state) => state?.spawnIndex)
       .filter((index) => typeof index === 'number')
   );
@@ -31,21 +194,158 @@ function getAvailableSpawnIndex() {
   }
 
   return 0;
-}
+};
 
-const players = {};
+const broadcastReadyStates = (roomId) => {
+  const room = rooms.get(roomId);
+  if (!room) {
+    return;
+  }
 
-let restartCooldownUntil = 0;
+  io.to(roomId).emit('readyStates', {
+    readyPlayerIds: Array.from(room.readyPlayers),
+    totalPlayers: room.players.size,
+  });
+};
+
+const cancelRoomCountdown = (roomId) => {
+  const room = rooms.get(roomId);
+  if (!room) {
+    return;
+  }
+
+  if (room.countdownTimer) {
+    clearTimeout(room.countdownTimer);
+    room.countdownTimer = null;
+  }
+
+  if (room.roundStarting) {
+    room.roundStarting = false;
+    io.to(roomId).emit('roundCountdownCancelled');
+  }
+};
+
+const resetPlayersForRoom = (roomId) => {
+  const room = rooms.get(roomId);
+  if (!room) {
+    return;
+  }
+
+  room.players.forEach((state, id) => {
+    const spawnIndex =
+      typeof state.spawnIndex === 'number'
+        ? state.spawnIndex
+        : getAvailableSpawnIndex(room);
+    const spawn = SPAWN_POSITIONS[spawnIndex] ?? SPAWN_POSITIONS[0];
+
+    const updatedState = {
+      ...state,
+      x: spawn.x,
+      y: spawn.y,
+      hp: 100,
+      guarding: false,
+      projectilesRemaining: DEFAULT_PROJECTILES,
+      spawnIndex,
+    };
+
+    room.players.set(id, updatedState);
+    io.to(id).emit('attacked', { hp: 100 });
+    io.to(roomId).emit('playerUpdate', { id, ...updatedState });
+    io.to(roomId).emit('spawnInfo', { id, spawnIndex });
+  });
+};
+
+const startRoomCountdown = (roomId) => {
+  const room = rooms.get(roomId);
+  if (!room || room.roundStarting) {
+    return;
+  }
+
+  if (room.players.size < 2) {
+    return;
+  }
+
+  room.roundStarting = true;
+
+  resetPlayersForRoom(roomId);
+
+  room.readyPlayers.clear();
+  broadcastReadyStates(roomId);
+
+  io.to(roomId).emit('restartGame');
+
+  if (room.countdownTimer) {
+    clearTimeout(room.countdownTimer);
+  }
+
+  room.countdownTimer = setTimeout(() => {
+    room.roundStarting = false;
+    room.countdownTimer = null;
+  }, ROUND_COUNTDOWN_DURATION_MS);
+};
+
+const removeSocketFromCurrentRoom = (socket) => {
+  const info = getRoomForSocket(socket);
+  if (!info) {
+    return;
+  }
+
+  const { roomId, room } = info;
+
+  room.players.delete(socket.id);
+  room.readyPlayers.delete(socket.id);
+
+  socket.leave(roomId);
+  socket.to(roomId).emit('playerLeft', { id: socket.id });
+
+  if (room.players.size < 2) {
+    cancelRoomCountdown(roomId);
+  }
+
+  broadcastReadyStates(roomId);
+  deleteRoomIfEmpty(roomId);
+  broadcastRoomList();
+};
 
 io.on('connection', socket => {
   console.log(`Player connected: ${socket.id}`);
-  socket.emit("yourId", socket.id);
+  socket.emit('yourId', socket.id);
+  socket.emit('roomList', { rooms: formatRoomList() });
 
-  if (!players[socket.id]) {
-    const spawnIndex = getAvailableSpawnIndex();
+  socket.on('requestRoomList', () => {
+    socket.emit('roomList', { rooms: formatRoomList() });
+  });
+
+  socket.on('joinRoom', ({ roomId: rawRoomId } = {}) => {
+    const roomId = sanitizeRoomId(rawRoomId);
+    if (!roomId) {
+      socket.emit('roomJoinError', { message: 'ルーム名を入力してください。' });
+      return;
+    }
+
+    const current = getRoomForSocket(socket);
+    if (current?.roomId === roomId) {
+      socket.emit('roomJoined', { roomId });
+      broadcastReadyStates(roomId);
+      return;
+    }
+
+    if (current) {
+      removeSocketFromCurrentRoom(socket);
+    }
+
+    const room = getOrCreateRoom(roomId);
+
+    if (room.players.size >= SPAWN_POSITIONS.length) {
+      socket.emit('roomJoinError', { message: 'このルームは満員です。' });
+      deleteRoomIfEmpty(roomId);
+      return;
+    }
+
+    const spawnIndex = getAvailableSpawnIndex(room);
     const spawn = SPAWN_POSITIONS[spawnIndex] ?? SPAWN_POSITIONS[0];
 
-    players[socket.id] = {
+    const initialState = {
       x: spawn.x,
       y: spawn.y,
       hp: 100,
@@ -55,72 +355,80 @@ io.on('connection', socket => {
       projectilesRemaining: DEFAULT_PROJECTILES,
       spawnIndex,
     };
-  }
 
-  // 既存プレイヤーの状態を新規接続に同期
-  Object.entries(players).forEach(([id, currentState]) => {
-    if (id === socket.id) {
+    room.players.set(socket.id, initialState);
+    socket.data.roomId = roomId;
+    socket.join(roomId);
+
+    socket.emit('roomJoined', { roomId });
+    socket.emit('playerUpdate', { id: socket.id, ...initialState });
+    socket.emit('spawnInfo', { id: socket.id, spawnIndex });
+
+    room.players.forEach((state, id) => {
+      if (id === socket.id) {
+        return;
+      }
+
+      socket.emit('playerUpdate', { id, ...state });
+      socket.emit('spawnInfo', { id, spawnIndex: state.spawnIndex });
+    });
+
+    socket.to(roomId).emit('playerUpdate', { id: socket.id, ...initialState });
+    socket.to(roomId).emit('spawnInfo', { id: socket.id, spawnIndex });
+
+    if (room.players.size < 2) {
+      cancelRoomCountdown(roomId);
+    }
+
+    broadcastReadyStates(roomId);
+    broadcastRoomList();
+  });
+
+  socket.on('setReadyState', ({ ready } = {}) => {
+    const info = getRoomForSocket(socket);
+    if (!info) {
       return;
     }
 
-    let state = currentState;
-    if (typeof state.spawnIndex !== 'number') {
-      const spawnIndex = getAvailableSpawnIndex();
-      const spawn = SPAWN_POSITIONS[spawnIndex] ?? SPAWN_POSITIONS[0];
-      players[id] = {
-        ...players[id],
-        spawnIndex,
-        x: spawn.x,
-        y: spawn.y,
-      };
-      state = players[id];
-    }
+    const { roomId, room } = info;
 
-    socket.emit('playerUpdate', { id, ...state });
-  });
-
-  socket.emit('playerUpdate', { id: socket.id, ...players[socket.id] });
-  socket.emit('spawnInfo', {
-    id: socket.id,
-    spawnIndex: players[socket.id].spawnIndex,
-  });
-
-  Object.entries(players).forEach(([id, state]) => {
-    if (id === socket.id) {
+    if (!room.players.has(socket.id) || room.roundStarting) {
       return;
     }
 
-    const spawnIndex =
-      typeof state.spawnIndex === 'number'
-        ? state.spawnIndex
-        : getAvailableSpawnIndex();
-    socket.emit('spawnInfo', { id, spawnIndex });
-  });
+    if (ready) {
+      room.readyPlayers.add(socket.id);
+    } else {
+      room.readyPlayers.delete(socket.id);
+    }
 
-  socket.broadcast.emit('playerUpdate', { id: socket.id, ...players[socket.id] });
-  socket.broadcast.emit('spawnInfo', {
-    id: socket.id,
-    spawnIndex: players[socket.id].spawnIndex,
+    if (room.readyPlayers.size >= 2 && room.players.size >= 2) {
+      startRoomCountdown(roomId);
+      return;
+    }
+
+    broadcastReadyStates(roomId);
   });
 
   socket.on('update', data => {
-    const previous = players[socket.id] ?? {
-      x: 0,
-      y: 0,
-      hp: 100,
-      guarding: false,
-      color: 0x000000,
-      name: '',
-      projectilesRemaining: DEFAULT_PROJECTILES,
-      spawnIndex: getAvailableSpawnIndex(),
-    };
+    const info = getRoomForSocket(socket);
+    if (!info) {
+      return;
+    }
+
+    const { roomId, room } = info;
+
+    const previous = room.players.get(socket.id);
+    if (!previous) {
+      return;
+    }
 
     const sanitizedName =
       typeof data.name === 'string'
         ? data.name.trim().slice(0, 16)
         : previous.name;
 
-    players[socket.id] = {
+    const updatedState = {
       ...previous,
       x: typeof data.x === 'number' ? data.x : previous.x,
       y: typeof data.y === 'number' ? data.y : previous.y,
@@ -138,61 +446,28 @@ io.on('connection', socket => {
       spawnIndex: previous.spawnIndex,
     };
 
-    socket.broadcast.emit('playerUpdate', {
+    room.players.set(socket.id, updatedState);
+
+    socket.to(roomId).emit('playerUpdate', {
       id: socket.id,
-      ...players[socket.id]
-    });
-  });
-
-  socket.on('restart', () => {
-    const now = Date.now();
-    if (now < restartCooldownUntil) {
-      return;
-    }
-
-    restartCooldownUntil = now + RESTART_COOLDOWN_MS;
-
-    Object.keys(players).forEach((id) => {
-      if (!players[id]) {
-        return;
-      }
-
-      const spawnIndex =
-        typeof players[id]?.spawnIndex === 'number'
-          ? players[id].spawnIndex
-          : getAvailableSpawnIndex();
-      const spawn = SPAWN_POSITIONS[spawnIndex] ?? SPAWN_POSITIONS[0];
-
-      players[id] = {
-        ...players[id],
-        x: spawn.x,
-        y: spawn.y,
-        hp: 100,
-        guarding: false,
-        projectilesRemaining: DEFAULT_PROJECTILES,
-        spawnIndex,
-      };
-
-      io.to(id).emit('attacked', { hp: 100 });
-    });
-
-    io.emit('restartGame');
-
-    Object.entries(players).forEach(([id, state]) => {
-      io.emit('playerUpdate', { id, ...state });
+      ...updatedState,
     });
   });
 
   socket.on('attack', (attackerPos) => {
-    // 攻撃アニメを全員に通知（自分以外）
-    socket.broadcast.emit('opponentAttack', { attackerId: socket.id });
+    const info = getRoomForSocket(socket);
+    if (!info) {
+      return;
+    }
 
-    for (let id in players) {
+    const { roomId, room } = info;
+
+    socket.to(roomId).emit('opponentAttack', { attackerId: socket.id });
+
+    for (const [id, target] of room.players.entries()) {
       if (id === socket.id) {
         continue;
       }
-
-      const target = players[id];
       if (!target) {
         continue;
       }
@@ -203,14 +478,14 @@ io.on('connection', socket => {
 
       if (distance < 60) {
         if (!target.guarding) {
-          players[id].hp = Math.max(0, players[id].hp - 10);
-          io.to(id).emit('attacked', { hp: players[id].hp });
+          target.hp = Math.max(0, target.hp - 10);
+          room.players.set(id, target);
+          io.to(id).emit('attacked', { hp: target.hp });
         }
 
-        // HP やガード状態を最新化
-        io.emit('playerUpdate', { id, ...players[id] });
+        io.to(roomId).emit('playerUpdate', { id, ...target });
 
-        if (players[id].hp <= 0) {
+        if (target.hp <= 0) {
           io.to(id).emit('gameover', { result: "LOSE" });
           io.to(socket.id).emit('gameover', { result: "WIN" });
         }
@@ -219,7 +494,14 @@ io.on('connection', socket => {
   });
 
   socket.on('projectile', ({ direction } = {}) => {
-    const shooter = players[socket.id];
+    const info = getRoomForSocket(socket);
+    if (!info) {
+      return;
+    }
+
+    const { roomId, room } = info;
+
+    const shooter = room.players.get(socket.id);
     if (!shooter) {
       return;
     }
@@ -239,11 +521,11 @@ io.on('connection', socket => {
       ...shooter,
       projectilesRemaining: remaining - 1,
     };
-    players[socket.id] = updatedShooter;
+    room.players.set(socket.id, updatedShooter);
 
-    io.emit('playerUpdate', { id: socket.id, ...updatedShooter });
+    io.to(roomId).emit('playerUpdate', { id: socket.id, ...updatedShooter });
 
-    io.emit('projectileFired', {
+    io.to(roomId).emit('projectileFired', {
       shooterId: socket.id,
       x: updatedShooter.x,
       y: updatedShooter.y,
@@ -251,7 +533,7 @@ io.on('connection', socket => {
       color: updatedShooter.color,
     });
 
-    for (const [id, target] of Object.entries(players)) {
+    for (const [id, target] of room.players.entries()) {
       if (id === socket.id || !target) {
         continue;
       }
@@ -278,19 +560,20 @@ io.on('connection', socket => {
       );
 
       setTimeout(() => {
-        const latestTarget = players[id];
+        const latestTarget = room.players.get(id);
         if (!latestTarget || latestTarget.hp <= 0) {
           return;
         }
 
         if (latestTarget.guarding) {
-          io.emit('playerUpdate', { id, ...latestTarget });
+          io.to(roomId).emit('playerUpdate', { id, ...latestTarget });
           return;
         }
 
         latestTarget.hp = Math.max(0, latestTarget.hp - PROJECTILE_DAMAGE);
+        room.players.set(id, latestTarget);
         io.to(id).emit('attacked', { hp: latestTarget.hp });
-        io.emit('playerUpdate', { id, ...latestTarget });
+        io.to(roomId).emit('playerUpdate', { id, ...latestTarget });
 
         if (latestTarget.hp <= 0) {
           io.to(id).emit('gameover', { result: "LOSE" });
@@ -312,7 +595,7 @@ io.on('connection', socket => {
 
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
-    delete players[socket.id];
+    removeSocketFromCurrentRoom(socket);
   });
 });
 
