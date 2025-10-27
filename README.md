@@ -1,16 +1,22 @@
-#　Stick Fighterの動かし方
-   `server` 側の人がcmdでnode サーバーを起動
-   `client` 側の人がcmdでviteを起動します
-## セットアップ手順
-　　`client/script.js`の19行目をサーバーを立てるPCのローカル(プライベート)IPに変更してください
+# Stick Fighterの動かし方
 
-   `server`側　cmd　
-    ```
-        npm run dev
-    ```
-   `client`側　cmd
-    ```
-    node server.js
-    ```
+サーバーを起動すると、同じポートでクライアント用のページも配信されます。プレイヤーはブラウザでサーバーのURLにアクセスするだけで参加できます。
 
-### ラグをいじる設定はscript.jsの109行目にあります
+## セットアップ
+1. 依存関係をインストールしてクライアントをビルドします。
+   ```bash
+   cd client
+   npm install
+   npm run build
+   cd ../server
+   npm install
+   ```
+
+## サーバーの起動
+1. `server` ディレクトリで Socket.IO サーバーを起動します。
+   ```bash
+   npm start
+   ```
+2. ブラウザで `http://<サーバーのホスト名またはIP>:3000` にアクセスするとゲームが開始できます。
+
+> **Note:** `client/script.js` を編集してIPアドレスを指定する必要はなくなりました。サーバーと同じホスト・ポートで自動的にSocket.IOへ接続します。
