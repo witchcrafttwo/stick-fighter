@@ -16,7 +16,7 @@ const resolveSocketUrl = () => {
   return `${protocol}//${hostname}${port ? `:${port}` : ''}`;
 };
 
-const socket = io("http://192.168.10.112:3000", );
+const socket = io(resolveSocketUrl());
 
 const COLORS = [
   { hex: '#000000', label: 'ブラック' },
@@ -27,11 +27,20 @@ const COLORS = [
   { hex: '#9b59b6', label: 'パープル' },
 ];
 
+const roomSelectionOverlay = document.getElementById('room-selection');
 const colorSelectionOverlay = document.getElementById('color-selection');
+const roomListContainer = document.getElementById('room-list');
+const roomNameInput = document.getElementById('room-name-input');
+const joinRoomButton = document.getElementById('join-room-button');
+const refreshRoomsButton = document.getElementById('refresh-rooms');
+const roomErrorLabel = document.getElementById('room-error');
 const colorOptionsContainer = document.getElementById('color-options');
 const nameInput = document.getElementById('player-name');
 const startButton = document.getElementById('start-game');
 const pingValueLabel = document.getElementById('ping-value');
+const currentRoomLabel = document.getElementById('current-room');
+const readyButton = document.getElementById('ready-button');
+const readyStatusLabel = document.getElementById('ready-status');
 
 const hexToNumber = (hex) => parseInt(hex.replace('#', ''), 16);
 
@@ -41,11 +50,17 @@ const PROJECTILE_LIFETIME = 2200;
 const GUARD_MAX_DURATION = 3000;
 const GUARD_COOLDOWN = 1000;
 const PROJECTILE_VERTICAL_TOLERANCE = 60;
+const ROUND_PHASES = {
+  WARMUP: 'warmup',
+  COUNTDOWN: 'countdown',
+  ACTIVE: 'active',
+};
 const SPAWN_POSITIONS = [
   { x: 200, y: 500 },
   { x: 600, y: 500 },
 ];
 const PING_INTERVAL_MS = 4000;
+const ROOM_CAPACITY = SPAWN_POSITIONS.length;
 
 const config = {
   type: Phaser.AUTO,
@@ -112,15 +127,46 @@ const laggedTimeouts = new Set();
 let latestPing = null;
 let pingIntervalId = null;
 let isRoundStarting = false;
-let restartRequestPending = false;
 let controlsLocked = false;
 let countdownTimerId = null;
-let restartUnlockTimeoutId = null;
+let countdownTextObject = null;
+let currentRoomId = null;
+let isReady = false;
+let knownReadyIds = new Set();
+let pendingRoomJoin = false;
+let currentRoundPhase = ROUND_PHASES.WARMUP;
 
 const updateStartButtonState = () => {
   const hasName = nameInput.value.trim().length > 0;
-  startButton.disabled = !(hasName && selectedColorButton);
+  const canStart = Boolean(selectedColorButton) && hasName && Boolean(currentRoomId);
+  startButton.disabled = !canStart;
 };
+
+const updateReadyButtonState = () => {
+  if (!readyButton) {
+    return;
+  }
+
+  const isWarmup = currentRoundPhase === ROUND_PHASES.WARMUP;
+  const canReady = hasSelectedColor && Boolean(currentRoomId) && isWarmup;
+  readyButton.disabled = !canReady;
+  readyButton.classList.toggle('is-ready', isReady && canReady);
+
+  let label = '準備する';
+  if (isReady && canReady) {
+    label = '準備解除';
+  } else if (!isWarmup) {
+    label = currentRoundPhase === ROUND_PHASES.ACTIVE ? '対戦中' : 'カウント中';
+  }
+
+  readyButton.textContent = label;
+};
+
+const generateRoomName = () => `room-${Math.floor(Math.random() * 9000 + 1000)}`;
+
+if (roomNameInput && !roomNameInput.value) {
+  roomNameInput.value = generateRoomName();
+}
 
 COLORS.forEach((option) => {
   const optionWrapper = document.createElement('div');
@@ -172,10 +218,12 @@ startButton.addEventListener('click', () => {
 
   hasSelectedColor = true;
   colorSelectionOverlay.classList.add('hidden');
+  updateReadyButtonState();
   sendPlayerUpdate(true);
 });
 
 updateStartButtonState();
+updateReadyButtonState();
 
 const updatePingLabel = (value) => {
   if (!pingValueLabel) {
@@ -188,6 +236,183 @@ const updatePingLabel = (value) => {
     pingValueLabel.textContent = '--';
   }
 };
+
+const updateRoomLabel = () => {
+  if (!currentRoomLabel) {
+    return;
+  }
+
+  currentRoomLabel.textContent = currentRoomId ?? '未参加';
+};
+
+const updateReadyStatusText = (readyCount = 0, playerCount = 0) => {
+  if (!readyStatusLabel) {
+    return;
+  }
+
+  const normalizedPlayers = Math.min(Math.max(playerCount, 0), ROOM_CAPACITY);
+  const normalizedReady = Math.min(Math.max(readyCount, 0), ROOM_CAPACITY);
+  readyStatusLabel.textContent = `参加者 ${normalizedPlayers}/${ROOM_CAPACITY} | 準備 ${normalizedReady}/${ROOM_CAPACITY}`;
+};
+
+const setRoomError = (message = '') => {
+  if (roomErrorLabel) {
+    roomErrorLabel.textContent = message;
+  }
+};
+
+const setJoinButtonLoading = (loading) => {
+  if (!joinRoomButton) {
+    return;
+  }
+
+  pendingRoomJoin = loading;
+  joinRoomButton.disabled = loading;
+  joinRoomButton.textContent = loading ? '接続中...' : 'このルームで遊ぶ';
+};
+
+const joinSelectedRoom = (roomId) => {
+  const trimmed = typeof roomId === 'string' ? roomId.trim() : '';
+  if (!trimmed) {
+    setRoomError('ルーム名を入力してください。');
+    return;
+  }
+
+  if (!socket.connected) {
+    setRoomError('サーバーに接続されていません。');
+    return;
+  }
+
+  setRoomError('');
+  setJoinButtonLoading(true);
+  socket.emit('joinRoom', { roomId: trimmed });
+};
+
+const renderRoomList = (rooms = []) => {
+  if (!roomListContainer) {
+    return;
+  }
+
+  roomListContainer.innerHTML = '';
+
+  if (!Array.isArray(rooms) || rooms.length === 0) {
+    const placeholder = document.createElement('p');
+    placeholder.className = 'room-placeholder';
+    placeholder.textContent = '公開されているルームはありません。';
+    roomListContainer.appendChild(placeholder);
+    return;
+  }
+
+  rooms.forEach(({ id, playerCount, readyCount, capacity }) => {
+    const entry = document.createElement('button');
+    entry.type = 'button';
+    entry.className = 'room-item';
+
+    const maxPlayers = typeof capacity === 'number' && capacity > 0 ? capacity : ROOM_CAPACITY;
+    const playersInRoom = Math.min(Math.max(typeof playerCount === 'number' ? playerCount : 0, 0), maxPlayers);
+    const readyInRoom = Math.min(Math.max(typeof readyCount === 'number' ? readyCount : 0, 0), maxPlayers);
+
+    if (playersInRoom >= maxPlayers || id === currentRoomId) {
+      entry.disabled = true;
+    }
+
+    if (playersInRoom >= maxPlayers) {
+      entry.classList.add('full');
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'room-meta';
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'room-name';
+    nameSpan.textContent = id;
+
+    const statsSpan = document.createElement('span');
+    statsSpan.className = 'room-stats';
+    statsSpan.textContent = `参加 ${playersInRoom}/${maxPlayers} | 準備 ${readyInRoom}`;
+
+    meta.appendChild(nameSpan);
+    meta.appendChild(statsSpan);
+    entry.appendChild(meta);
+
+    const actionLabel = document.createElement('span');
+    actionLabel.className = 'room-stats';
+    actionLabel.textContent = id === currentRoomId
+      ? '参加中'
+      : playersInRoom >= maxPlayers
+        ? '満員'
+        : '参加';
+    entry.appendChild(actionLabel);
+
+    if (!entry.disabled) {
+      entry.addEventListener('click', () => {
+        if (pendingRoomJoin) {
+          return;
+        }
+
+        if (roomNameInput) {
+          roomNameInput.value = id;
+        }
+        joinSelectedRoom(id);
+      });
+    }
+
+    roomListContainer.appendChild(entry);
+  });
+};
+
+if (joinRoomButton) {
+  joinRoomButton.addEventListener('click', () => {
+    if (pendingRoomJoin) {
+      return;
+    }
+
+    joinSelectedRoom(roomNameInput?.value ?? '');
+  });
+}
+
+if (roomNameInput) {
+  roomNameInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (pendingRoomJoin) {
+        return;
+      }
+
+      joinSelectedRoom(roomNameInput.value);
+    }
+  });
+
+  roomNameInput.addEventListener('input', () => {
+    setRoomError('');
+  });
+}
+
+if (refreshRoomsButton) {
+  refreshRoomsButton.addEventListener('click', () => {
+    socket.emit('requestRoomList');
+  });
+}
+
+updateRoomLabel();
+updateReadyStatusText();
+
+if (readyButton) {
+  readyButton.addEventListener('click', () => {
+    if (readyButton.disabled) {
+      return;
+    }
+
+    if (currentRoundPhase !== ROUND_PHASES.WARMUP) {
+      return;
+    }
+
+    const nextReadyState = !isReady;
+    isReady = nextReadyState;
+    updateReadyButtonState();
+    socket.emit('setReadyState', { ready: nextReadyState });
+  });
+}
 
 const scheduleWithLag = (callback) => {
   if (displayLagMs <= 0) {
@@ -258,10 +483,23 @@ ensurePingInterval();
 socket.on("connect", () => {
   updatePingLabel(latestPing);
   socket.emit("latencyTest", { clientTime: performance.now() });
+  socket.emit('requestRoomList');
 });
 
 socket.on("disconnect", () => {
   updatePingLabel(null);
+  setJoinButtonLoading(false);
+  currentRoomId = null;
+  knownReadyIds = new Set();
+  isReady = false;
+  currentRoundPhase = ROUND_PHASES.WARMUP;
+  updateRoomLabel();
+  updateReadyStatusText();
+  updateReadyButtonState();
+  if (roomSelectionOverlay) {
+    roomSelectionOverlay.classList.remove('hidden');
+  }
+  setRoomError('サーバーとの接続が切断されました。');
 });
 
 socket.on("latencyPong", ({ clientTime } = {}) => {
@@ -273,18 +511,133 @@ socket.on("latencyPong", ({ clientTime } = {}) => {
   updatePingLabel(latestPing);
 });
 
+socket.on('roomList', ({ rooms } = {}) => {
+  renderRoomList(Array.isArray(rooms) ? rooms : []);
+});
+
+socket.on('roomJoinError', ({ message } = {}) => {
+  setJoinButtonLoading(false);
+  const errorMessage = typeof message === 'string' && message
+    ? message
+    : 'ルームに参加できませんでした。';
+  setRoomError(errorMessage);
+});
+
+socket.on('roomJoined', ({ roomId } = {}) => {
+  setJoinButtonLoading(false);
+  setRoomError('');
+  currentRoomId = typeof roomId === 'string' ? roomId : null;
+  updateRoomLabel();
+  knownReadyIds = new Set();
+  isReady = false;
+  currentRoundPhase = ROUND_PHASES.WARMUP;
+  updateReadyButtonState();
+  updateReadyStatusText(0, currentRoomId ? 1 : 0);
+
+  if (roomNameInput && currentRoomId) {
+    roomNameInput.value = currentRoomId;
+  }
+
+  if (roomSelectionOverlay) {
+    if (currentRoomId) {
+      roomSelectionOverlay.classList.add('hidden');
+    } else {
+      roomSelectionOverlay.classList.remove('hidden');
+    }
+  }
+
+  if (colorSelectionOverlay && !hasSelectedColor) {
+    colorSelectionOverlay.classList.remove('hidden');
+  }
+
+  if (waitingText) {
+    waitingText.setText('対戦相手を待っています...');
+    waitingText.setVisible(true);
+  }
+
+  hasOpponent = false;
+  opponentId = null;
+  opponentName = '';
+  opponentHp = 100;
+  opponentHadoukenRemaining = MAX_PROJECTILES;
+});
+
+socket.on('roundPhase', ({ phase } = {}) => {
+  const normalized = Object.values(ROUND_PHASES).includes(phase)
+    ? phase
+    : ROUND_PHASES.WARMUP;
+
+  currentRoundPhase = normalized;
+
+  if (currentRoundPhase !== ROUND_PHASES.WARMUP && isReady) {
+    isReady = false;
+  }
+
+  updateReadyButtonState();
+});
+
+socket.on('readyStates', ({ readyPlayerIds, totalPlayers } = {}) => {
+  const readyArray = Array.isArray(readyPlayerIds) ? readyPlayerIds : [];
+  knownReadyIds = new Set(readyArray);
+  const playerCount = typeof totalPlayers === 'number' ? totalPlayers : 0;
+  updateReadyStatusText(readyArray.length, playerCount);
+
+  if (myId) {
+    const isSelfReady = knownReadyIds.has(myId);
+    if (isReady !== isSelfReady) {
+      isReady = isSelfReady;
+    }
+  }
+
+  updateReadyButtonState();
+});
+
+socket.on('roundCountdownCancelled', () => {
+  currentRoundPhase = ROUND_PHASES.WARMUP;
+  updateReadyButtonState();
+  cancelCountdown();
+});
+
+socket.on('playerLeft', ({ id } = {}) => {
+  if (typeof id === 'string') {
+    knownReadyIds.delete(id);
+  }
+
+  if (id && id === opponentId) {
+    cancelCountdown();
+    hasOpponent = false;
+    opponentId = null;
+    opponentName = '';
+    opponentHp = 100;
+    opponentHadoukenRemaining = MAX_PROJECTILES;
+    if (waitingText) {
+      waitingText.setText('対戦相手を待っています...');
+      waitingText.setVisible(true);
+    }
+  }
+
+  updateReadyButtonState();
+});
+
 function preload() {}
 
-function resetGame() {
+function cancelCountdown() {
   if (countdownTimerId !== null) {
     clearInterval(countdownTimerId);
     countdownTimerId = null;
   }
 
-  if (restartUnlockTimeoutId !== null) {
-    clearTimeout(restartUnlockTimeoutId);
-    restartUnlockTimeoutId = null;
+  if (countdownTextObject) {
+    countdownTextObject.destroy();
+    countdownTextObject = null;
   }
+
+  isRoundStarting = false;
+  controlsLocked = false;
+}
+
+function resetGame() {
+  cancelCountdown();
 
   gameOver = false;
   hp = 100;
@@ -315,8 +668,6 @@ function resetGame() {
   resultText.setText("");
 
   sendPlayerUpdate(true);
-
-  restartRequestPending = false;
   isRoundStarting = false;
   controlsLocked = false;
 }
@@ -347,6 +698,11 @@ function sendPlayerUpdate(force = false) {
 }
 
 socket.on("restartGame", () => {
+  currentRoundPhase = ROUND_PHASES.COUNTDOWN;
+  if (isReady) {
+    isReady = false;
+  }
+  updateReadyButtonState();
   startCountdownAndReset();
 });
 
@@ -396,19 +752,17 @@ function startCountdownAndReset() {
 
   isRoundStarting = true;
   controlsLocked = true;
-  restartRequestPending = false;
-
-  if (restartUnlockTimeoutId !== null) {
-    clearTimeout(restartUnlockTimeoutId);
-    restartUnlockTimeoutId = null;
-  }
-
   if (countdownTimerId !== null) {
     clearInterval(countdownTimerId);
     countdownTimerId = null;
   }
 
-  const countdownText = scene
+  if (countdownTextObject) {
+    countdownTextObject.destroy();
+    countdownTextObject = null;
+  }
+
+  countdownTextObject = scene
     .add.text(400, 300, "", {
       fontSize: "64px",
       color: "#000",
@@ -417,22 +771,31 @@ function startCountdownAndReset() {
     .setOrigin(0.5);
 
   let count = 3;
-  countdownText.setText(count);
+  countdownTextObject.setText(count);
 
   countdownTimerId = window.setInterval(() => {
     count -= 1;
 
+    if (!countdownTextObject) {
+      if (countdownTimerId !== null) {
+        clearInterval(countdownTimerId);
+        countdownTimerId = null;
+      }
+      return;
+    }
+
     if (count > 0) {
-      countdownText.setText(count);
+      countdownTextObject.setText(count);
       return;
     }
 
     if (count === 0) {
-      countdownText.setText("FIGHT!");
+      countdownTextObject.setText('FIGHT!');
       return;
     }
 
-    countdownText.destroy();
+    countdownTextObject.destroy();
+    countdownTextObject = null;
     if (countdownTimerId !== null) {
       clearInterval(countdownTimerId);
       countdownTimerId = null;
@@ -492,34 +855,6 @@ function create() {
   }).setOrigin(0.5);
 
   projectileKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Z);
-  this.input.keyboard.on("keydown-R", () => {
-    if (restartRequestPending || isRoundStarting) {
-      return;
-    }
-
-    restartRequestPending = true;
-    controlsLocked = true;
-    if (player) {
-      player.setVelocityX(0);
-      player.setVelocityY(0);
-    }
-
-    if (restartUnlockTimeoutId !== null) {
-      clearTimeout(restartUnlockTimeoutId);
-    }
-
-    restartUnlockTimeoutId = window.setTimeout(() => {
-      restartUnlockTimeoutId = null;
-      if (isRoundStarting) {
-        return;
-      }
-
-      controlsLocked = false;
-      restartRequestPending = false;
-    }, 1500);
-
-    socket.emit("restart");
-  });
 
   socket.on("opponentAttack", (payload) => {
     const attackerId =
@@ -678,6 +1013,8 @@ function create() {
     const message = result === "WIN" ? "勝利！" : "敗北…";
     resultText.setText(message);
     gameOver = true;
+    currentRoundPhase = ROUND_PHASES.WARMUP;
+    updateReadyButtonState();
   });
 
   positionPlayersForSpawn();
