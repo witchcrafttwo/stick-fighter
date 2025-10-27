@@ -16,7 +16,7 @@ const resolveSocketUrl = () => {
   return `${protocol}//${hostname}${port ? `:${port}` : ''}`;
 };
 
-const socket = io("http://192.168.10.112:3000", );
+const socket = io(resolveSocketUrl());
 
 const COLORS = [
   { hex: '#000000', label: 'ブラック' },

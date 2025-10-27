@@ -1,7 +1,102 @@
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import { readFile } from 'fs/promises';
+import { extname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 
-const httpServer = createServer();
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const clientDistPath = resolve(__dirname, '../client/dist');
+
+const mimeTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+const serveIndexHtml = async (res, method = 'GET') => {
+  const indexPath = resolve(clientDistPath, 'index.html');
+  const html = await readFile(indexPath);
+  res.writeHead(200, { 'Content-Type': mimeTypes['.html'] });
+  if (method === 'HEAD') {
+    res.end();
+    return;
+  }
+  res.end(html);
+};
+
+const httpServer = createServer(async (req, res) => {
+  if (!req?.url) {
+    res.writeHead(400, { 'Content-Type': mimeTypes['.txt'] });
+    res.end('Bad Request');
+    return;
+  }
+
+  const method = req.method ?? 'GET';
+
+  if (req.url.startsWith('/socket.io/')) {
+    return;
+  }
+
+  if (method !== 'GET' && method !== 'HEAD') {
+    res.writeHead(405, { 'Content-Type': mimeTypes['.txt'] });
+    res.end('Method Not Allowed');
+    return;
+  }
+
+  const requestUrl = new URL(req.url, 'http://localhost');
+  let pathname = decodeURIComponent(requestUrl.pathname);
+
+  if (pathname.endsWith('/')) {
+    pathname = `${pathname}index.html`;
+  }
+
+  if (pathname === '/') {
+    pathname = '/index.html';
+  }
+
+  const filePath = resolve(clientDistPath, `.${pathname}`);
+
+  if (!filePath.startsWith(clientDistPath)) {
+    res.writeHead(403, { 'Content-Type': mimeTypes['.txt'] });
+    res.end('Forbidden');
+    return;
+  }
+
+  try {
+    const file = await readFile(filePath);
+    const extension = extname(filePath);
+    const contentType = mimeTypes[extension] ?? 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': contentType });
+    if (method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(file);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      try {
+        await serveIndexHtml(res, method);
+      } catch (indexError) {
+        if (indexError?.code === 'ENOENT') {
+          res.writeHead(404, { 'Content-Type': mimeTypes['.txt'] });
+          res.end('Client build not found. Run "npm install && npm run build" inside the client directory.');
+        } else {
+          res.writeHead(500, { 'Content-Type': mimeTypes['.txt'] });
+          res.end('Internal Server Error');
+        }
+      }
+    } else {
+      res.writeHead(500, { 'Content-Type': mimeTypes['.txt'] });
+      res.end('Internal Server Error');
+    }
+  }
+});
+
 const io = new Server(httpServer, { cors: { origin: "*" } });
 
 const DEFAULT_PROJECTILES = 5;
