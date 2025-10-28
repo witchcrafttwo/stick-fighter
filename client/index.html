@@ -19,7 +19,7 @@
       margin: 0 auto;
     }
 
-    #color-selection {
+    .modal-overlay {
       position: fixed;
       inset: 0;
       display: flex;
@@ -29,30 +29,126 @@
       z-index: 10;
     }
 
-    #color-selection.hidden {
+    .modal-overlay.hidden {
       display: none;
     }
 
-    .color-panel {
+    .modal-panel {
       background: #ffffff;
       padding: 28px 36px;
       border-radius: 18px;
-      max-width: 420px;
+      max-width: 500px;
       width: calc(100% - 32px);
       text-align: center;
       box-shadow: 0 18px 40px rgba(0, 0, 0, 0.25);
     }
 
-    .color-panel h1 {
+    .modal-panel h1 {
       margin: 0 0 12px;
       font-size: 24px;
       color: #222;
     }
 
-    .color-panel p {
+    .modal-panel p {
       margin: 6px 0 0;
       color: #555;
       font-size: 15px;
+    }
+
+    .room-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin: 20px 0 12px;
+      max-height: 260px;
+      overflow-y: auto;
+      padding-right: 6px;
+    }
+
+    .room-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border: 1px solid #d5d5d5;
+      border-radius: 12px;
+      background: #fafafa;
+      cursor: pointer;
+      transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+      text-align: left;
+    }
+
+    .room-item:hover {
+      border-color: #00a2ff;
+      box-shadow: 0 10px 20px rgba(0, 162, 255, 0.18);
+      background: #ffffff;
+    }
+
+    .room-item.full {
+      opacity: 0.55;
+      cursor: not-allowed;
+      box-shadow: none;
+      border-color: #d5d5d5;
+    }
+
+    .room-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .room-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1e1e1e;
+    }
+
+    .room-stats {
+      font-size: 13px;
+      color: #555;
+    }
+
+    .room-placeholder {
+      margin: 12px 0;
+      font-size: 14px;
+      color: #666;
+    }
+
+    .room-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 6px;
+    }
+
+    .room-input {
+      flex: 1;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #ccc;
+      font-size: 15px;
+    }
+
+    .secondary-button {
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid #0087ff;
+      background: transparent;
+      color: #0087ff;
+      font-size: 15px;
+      cursor: pointer;
+      transition: background 0.18s ease, color 0.18s ease;
+    }
+
+    .secondary-button:hover {
+      background: rgba(0, 135, 255, 0.12);
+    }
+
+    .error-message {
+      margin-top: 10px;
+      font-size: 14px;
+      color: #d83b3b;
+      min-height: 20px;
     }
 
     .name-input {
@@ -144,7 +240,7 @@
       border-radius: 12px;
       background: rgba(255, 255, 255, 0.92);
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
-      min-width: 160px;
+      min-width: 200px;
       z-index: 5;
       font-size: 14px;
       color: #222;
@@ -158,6 +254,58 @@
       justify-content: space-between;
       gap: 8px;
     }
+
+    .room-status {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #333;
+    }
+
+    .room-status strong {
+      font-weight: 600;
+    }
+
+    .ready-section {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .ready-status-text {
+      font-size: 13px;
+      color: #444;
+      text-align: center;
+    }
+
+    .ready-button {
+      padding: 10px 16px;
+      border-radius: 999px;
+      border: none;
+      background: linear-gradient(135deg, #00b894, #00cec9);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+    }
+
+    .ready-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+
+    .ready-button:not(:disabled):hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 22px rgba(0, 206, 201, 0.32);
+    }
+
+    .ready-button.is-ready {
+      background: linear-gradient(135deg, #6c5ce7, #a29bfe);
+    }
   </style>
 </head>
 <body>
@@ -166,14 +314,37 @@
       <span>Ping</span>
       <span id="ping-value">--</span>
     </div>
+    <div class="room-status">
+      <div><strong>ルーム:</strong> <span id="current-room">未参加</span></div>
+    </div>
+    <div class="ready-section">
+      <div id="ready-status" class="ready-status-text">準備状況: 0/2</div>
+      <button id="ready-button" class="ready-button" disabled>準備する</button>
+    </div>
   </div>
-  <div id="color-selection">
-    <div class="color-panel">
+  <div id="room-selection" class="modal-overlay">
+    <div class="modal-panel">
+      <h1>ルームを選択</h1>
+      <p>参加したいルームを選ぶか、新しいルーム名を入力してください。</p>
+      <div id="room-list" class="room-list">
+        <p class="room-placeholder">ルーム情報を読み込み中...</p>
+      </div>
+      <div class="room-actions">
+        <input id="room-name-input" class="room-input" type="text" placeholder="ルーム名を入力" maxlength="32" />
+        <button id="join-room-button" class="start-button" type="button">このルームで遊ぶ</button>
+      </div>
+      <button id="refresh-rooms" class="secondary-button" type="button">ルーム一覧を更新</button>
+      <p id="room-error" class="error-message"></p>
+    </div>
+  </div>
+  <div id="color-selection" class="modal-overlay hidden">
+    <div class="modal-panel">
       <h1>キャラクターの色を選択</h1>
       <div id="color-options" class="color-options"></div>
       <input id="player-name" class="name-input" type="text" placeholder="プレイヤー名を入力" maxlength="16" />
-      <button id="start-game" class="start-button" disabled>ゲーム開始</button>
-      <p class="hint">色を選び、名前を入力するとゲームが始まります。<br />スペース: 近接攻撃 / Z: 波動拳 (最大5回・15ダメージ) / Shift: 3秒間ガード (1秒クールダウン)</p>
+      <button id="start-game" class="start-button" disabled>ゲーム参加</button>
+      <p class="hint">色と名前を決めたらゲームに参加できます。<br />スペース: 近接攻撃 / Z: 波動拳 (最大5回・15ダメージ) / Shift: 3秒間ガード (1秒クールダウン)</p>
+      <p class="hint">準備完了ボタンを押して対戦を開始しましょう。2人とも準備するとカウントダウンが始まります。</p>
     </div>
   </div>
   <script type="module" src="/script.js"></script>
